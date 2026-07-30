@@ -2,12 +2,19 @@
   (:require [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
+            [bitcoin.consensus.sighash :as sighash]
+            [bitcoin.consensus.script :as script]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.consensus.sync :as sync]
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
+            [bitcoin.consensus.versionbits :as versionbits]
+            [btc-crypto.core :as bitcoin-crypto]
+            [btc-crypto.schnorr :as schnorr]
+            [btc-crypto.tx :as bitcoin-tx]
             [clojure.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header]
+            [eth-crypto.core :as eth]
             [sha256d.core :as sha256d])
   (:import (java.nio.file Files)
            (java.util Random)))
@@ -37,7 +44,8 @@
     {:version 1
      :inputs [{:txid-natural (vec (repeat 32 0))
                :vout 0xffffffff
-               :script-sig [height branch]
+               :script-sig
+               (conj (chainstate/coinbase-height-prefix height) branch)
                :sequence 0xffffffff}]
      :outputs [{:value (utxo/block-subsidy height)
                 :script-pubkey [81]}]
@@ -129,6 +137,18 @@
                          [:outputs 0 :value]
                          (inc transaction/max-money)))))))))
 
+(deftest signed-transaction-versions-round-trip-without-enabling-bip68
+  (let [value {:version -1
+               :inputs [{:txid-natural (vec (repeat 32 1))
+                         :vout 0 :script-sig [] :sequence 1}]
+               :outputs [{:value 1 :script-pubkey [81]}]
+               :locktime 0 :segwit? false}
+        parsed (transaction/parse (transaction/serialize value))]
+    (is (= -1 (:version parsed)))
+    (is (= {:height -1 :time -1}
+           (transaction/calculate-sequence-locks
+            parsed [100] (constantly 0))))))
+
 (deftest context-free-transaction-and-finality-rules-fail-closed
   (let [input {:txid-natural (vec (repeat 32 3))
                :vout 0 :script-sig [] :sequence 0}
@@ -206,6 +226,218 @@
             #(block/validate-witness-commitment!
               [(assoc-in coinbase [:outputs 0 :script-pubkey] [81])]))))))
 
+(deftest bip143-signature-hash-matches-the-official-worked-example
+  (let [value
+        {:version 1
+         :inputs
+         [{:txid-natural
+           (vec
+            (reverse
+             (hex->bytes
+              "9f96ade4b41d5433f4eda31e1738ec2b36f6e7d1420d94a6af99801a88f7f7ff")))
+           :vout 0 :script-sig [] :sequence 4294967278}
+          {:txid-natural
+           (vec
+            (reverse
+             (hex->bytes
+              "8ac60eb9575db5b2d987e29f301b5b819ea83a5c6579d282d189cc04b8e151ef")))
+           :vout 1 :script-sig [] :sequence 4294967295}]
+         :outputs
+         [{:value 112340000
+           :script-pubkey
+           (hex->bytes
+            "76a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac")}
+          {:value 223450000
+           :script-pubkey
+           (hex->bytes
+            "76a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac")}]
+         :locktime 17}
+        script-code
+        (hex->bytes
+         "76a9141d0f172a0ecb48aee1be1f2687d2963ae33f71a188ac")]
+    (is (= "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670"
+           (apply str
+                  (map #(format "%02x" (bit-and 0xff %))
+                       (sighash/bip143 value 1 script-code
+                                        600000000 1)))))))
+
+(deftest legacy-sighash-single-preserves-the-historical-one-hash
+  (let [value {:version 1
+               :inputs [{:txid-natural (vec (repeat 32 1))
+                         :vout 0 :script-sig [] :sequence 0xffffffff}]
+               :outputs [] :locktime 0}]
+    (is (= sighash/one-hash
+           (sighash/legacy value 0 [81] 3)))
+    (is (not= (sighash/legacy
+               (assoc value :outputs
+                      [{:value 1 :script-pubkey [81]}])
+               0 [81] 1)
+              (sighash/legacy
+               (assoc value :outputs
+                      [{:value 2 :script-pubkey [81]}])
+               0 [81] 1)))))
+
+(def script-test-private-key
+  (byte-array (map unchecked-byte (range 1 33))))
+
+(def script-test-public-key
+  (mapv #(bit-and 0xff %)
+        (bitcoin-crypto/compressed-pubkey script-test-private-key)))
+
+(defn test-hash160 [value]
+  (mapv #(bit-and 0xff %)
+        (bitcoin-crypto/hash160
+         (byte-array (map unchecked-byte value)))))
+
+(defn bitcoin-signature-with-key [private-key digest]
+  (vec
+   (concat
+    (map #(bit-and 0xff %)
+         (bitcoin-tx/der-encode-sig
+          (eth/secp256k1-sign
+           private-key
+           (byte-array (map unchecked-byte digest)))))
+    [1])))
+
+(defn bitcoin-signature [digest]
+  (bitcoin-signature-with-key script-test-private-key digest))
+
+(defn spending-transaction [script-sig witnesses]
+  {:version 2
+   :inputs [{:txid-natural (vec (repeat 32 7))
+             :vout 0 :script-sig (vec script-sig)
+             :sequence 0xfffffffe}]
+   :outputs [{:value 900 :script-pubkey [81]}]
+   :witnesses witnesses
+   :segwit? (boolean witnesses)
+   :locktime 0})
+
+(deftest real-ecdsa-p2pkh-and-p2sh-scripts-verify-end-to-end
+  (let [p2pkh
+        (vec (concat [script/op-dup script/op-hash160 20]
+                     (test-hash160 script-test-public-key)
+                     [script/op-equalverify script/op-checksig]))
+        coin {:value 1000 :script-pubkey p2pkh}
+        unsigned (spending-transaction [] nil)
+        signature (bitcoin-signature
+                   (sighash/legacy unsigned 0 p2pkh 1))
+        signed
+        (assoc-in unsigned [:inputs 0 :script-sig]
+                  (vec (concat (script/push-data signature)
+                               (script/push-data script-test-public-key))))
+        lax-signature (assoc signature 1 0)
+        lax-signed
+        (assoc-in unsigned [:inputs 0 :script-sig]
+                  (vec (concat (script/push-data lax-signature)
+                               (script/push-data script-test-public-key))))
+        redeem p2pkh
+        p2sh-script
+        (vec (concat [script/op-hash160 20]
+                     (test-hash160 redeem) [script/op-equal]))
+        p2sh-coin {:value 1000 :script-pubkey p2sh-script}
+        p2sh-signature
+        (bitcoin-signature (sighash/legacy unsigned 0 redeem 1))
+        p2sh-signed
+        (assoc-in unsigned [:inputs 0 :script-sig]
+                  (vec (concat
+                        (script/push-data p2sh-signature)
+                        (script/push-data script-test-public-key)
+                        (script/push-data redeem))))]
+    (is (true? (script/verify-input signed 0 coin)))
+    (is (true? (script/verify-input
+                lax-signed 0 coin #{:p2sh :witness})))
+    (is (= :bitcoin.consensus/eval-false
+           (error-type
+            #(script/verify-input
+              lax-signed 0 coin #{:p2sh :witness :dersig}))))
+    (is (true? (script/verify-input p2sh-signed 0 p2sh-coin)))
+    (is (= :bitcoin.consensus/eval-false
+           (error-type
+            #(script/verify-input
+              (assoc-in signed [:outputs 0 :value] 901)
+              0 coin))))))
+
+(deftest segwit-v0-p2wpkh-and-p2wsh-verify-end-to-end
+  (let [key-hash (test-hash160 script-test-public-key)
+        script-code
+        (vec (concat [script/op-dup script/op-hash160 20]
+                     key-hash [script/op-equalverify
+                               script/op-checksig]))
+        coin {:value 1000 :script-pubkey
+              (vec (concat [0 20] key-hash))}
+        unsigned (spending-transaction [] [[]])
+        signature
+        (bitcoin-signature
+         (sighash/bip143 unsigned 0 script-code 1000 1))
+        signed (assoc unsigned :witnesses
+                      [[signature script-test-public-key]])
+        witness-script [81]
+        p2wsh-coin
+        {:value 1000
+         :script-pubkey
+         (vec (concat [0 32]
+                      (sha256d/sha256-bytes witness-script)))}
+        p2wsh (spending-transaction [] [[witness-script]])]
+    (is (true? (script/verify-input signed 0 coin)))
+    (is (true? (script/verify-input p2wsh 0 p2wsh-coin)))
+    (is (= :bitcoin.consensus/witness-program-mismatch
+           (error-type
+            #(script/verify-input
+              (assoc signed :witnesses [[signature]])
+              0 coin))))))
+
+(deftest multisig-locktime-sequence-and-numeric-opcodes-execute
+  (let [private-key-2 (byte-array
+                       (map unchecked-byte (range 33 65)))
+        public-key-2
+        (mapv #(bit-and 0xff %)
+              (bitcoin-crypto/compressed-pubkey private-key-2))
+        multisig-script
+        (vec
+         (concat
+          [0x52]
+          (script/push-data script-test-public-key)
+          (script/push-data public-key-2)
+          [0x52 script/op-checkmultisig]))
+        coin {:value 1000 :script-pubkey multisig-script}
+        unsigned (spending-transaction [] nil)
+        digest (sighash/legacy unsigned 0 multisig-script 1)
+        signature-1 (bitcoin-signature digest)
+        signature-2 (bitcoin-signature-with-key private-key-2 digest)
+        signed
+        (assoc-in unsigned [:inputs 0 :script-sig]
+                  (vec (concat [script/op-0]
+                               (script/push-data signature-1)
+                               (script/push-data signature-2))))
+        context
+        {:transaction
+         (assoc-in unsigned [:inputs 0 :sequence] 5)
+         :input-index 0 :coin {:value 0 :script-pubkey []}
+         :sigversion :base :flags script/default-flags}]
+    (is (true? (script/verify-input signed 0 coin)))
+    (is (= [[1]]
+           (script/evaluate [] [0x52 0x53 0x93 0x55 0x9c]
+                            context)))
+    (is (= [[1]]
+           (script/evaluate []
+                            [0x55 script/op-checklocktimeverify
+                             script/op-drop 0x51]
+                            (assoc-in context
+                                      [:transaction :locktime] 5))))
+    (is (= [[1]]
+           (script/evaluate []
+                            [0x55 script/op-checksequenceverify
+                             script/op-drop 0x51]
+                            context)))
+    (is (= :bitcoin.consensus/null-dummy
+           (error-type
+            #(script/verify-input
+              (assoc-in signed [:inputs 0 :script-sig]
+                        (vec (concat [0x51]
+                                     (script/push-data signature-1)
+                                     (script/push-data signature-2))))
+              0 coin))))))
+
 (deftest bip34-height-prefix-is-minimally-script-number-encoded
   (is (= [1 1] (chainstate/coinbase-height-prefix 1)))
   (is (= [2 128 0] (chainstate/coinbase-height-prefix 128)))
@@ -277,6 +509,7 @@
                         [:transactions 1 :outputs 0 :value] 1001)
               11 (constantly true)))))
     (is (= 2500000000 (utxo/block-subsidy 210000)))
+    (is (= 2500000000 (utxo/block-subsidy 150 150)))
     (is (zero? (utxo/block-subsidy (* 64 210000))))))
 
 (deftest undo-restores-the-exact-previous-utxo-state
@@ -287,13 +520,44 @@
     (is (= utxo/empty-state
            (utxo/disconnect-block (:state transition) (:undo transition))))))
 
+(deftest bip30-exceptions-are-explicit-and-op-return-is-not-stored
+  (let [txid (vec (repeat 32 21))
+        coinbase
+        {:txid-natural txid
+         :inputs [{:txid-natural (vec (repeat 32 0))
+                   :vout 0xffffffff :script-sig [1 1]
+                   :sequence 0xffffffff}]
+         :outputs [{:value 1 :script-pubkey [81]}]}
+        block {:transactions [coinbase]}
+        existing
+        {:height 0
+         :coins {[txid 0]
+                 {:value 2 :script-pubkey [81]
+                  :height 0 :coinbase? true}}}]
+    (is (= :bitcoin.consensus/overwrite-unspent
+           (error-type
+            #(utxo/apply-block existing block 1 (constantly true)))))
+    (is (= 1
+           (get-in
+            (utxo/apply-block
+             existing block 1 (constantly true)
+             {:allow-bip30-overwrite? true})
+            [:coins [txid 0] :value])))
+    (is (empty?
+         (:coins
+          (utxo/apply-block
+           utxo/empty-state
+           (assoc-in block [:transactions 0 :outputs 0 :script-pubkey]
+                     [0x6a 1 1])
+           1 (constantly true)))))
+    (is (= 2 (count chainstate/bip30-repeat-blocks)))))
+
 (deftest chainstate-connects-real-block-one-by-most-work
   (let [genesis (block/parse (hex->bytes genesis-block-hex))
         block-one (block/parse (hex->bytes block-one-hex))
-        initial (chainstate/initialize :mainnet genesis (constantly true))
+        initial (chainstate/initialize :mainnet genesis)
         connected
-        (chainstate/accept-block initial block-one 2000000000
-                                 (constantly true))]
+        (chainstate/accept-block initial block-one 2000000000)]
     (is (= 0 (chainstate/active-height initial)))
     (is (= 1 (chainstate/active-height connected)))
     (is (= (get-in block-one [:header :hash-hex])
@@ -301,6 +565,260 @@
     (is (true? (get-in connected
                        [:nodes (:active-tip connected) :block-valid?])))
     (is (= 2 (count (get-in connected [:utxo :coins]))))))
+
+(deftest bip68-relative-height-and-time-locks-match-last-invalid-semantics
+  (let [base {:version 2
+              :inputs [{:sequence 3} {:sequence 0x00400002}]}
+        locks (transaction/calculate-sequence-locks
+               base [100 200] (fn [height] (* height 600)))]
+    (is (= {:height 102 :time (+ (* 199 600) 1024 -1)}
+           locks))
+    (is (false? (transaction/sequence-locks-satisfied?
+                 locks 102 (:time locks))))
+    (is (true? (transaction/sequence-locks-satisfied?
+                locks 103 (inc (:time locks)))))
+    (is (= {:height -1 :time -1}
+           (transaction/calculate-sequence-locks
+            (assoc base :version 1) [100 200] (constantly 0))))
+    (is (= {:height -1 :time -1}
+           (transaction/calculate-sequence-locks
+            (assoc base :inputs [{:sequence 0x80000001}])
+            [100] (constantly 0))))))
+
+(deftest block-script-flags-follow-buried-activation-boundaries
+  (let [mainnet (:mainnet chainstate/consensus-parameters)
+        before (chainstate/script-flags mainnet 363724 "ordinary")
+        dersig (chainstate/script-flags mainnet 363725 "ordinary")
+        segwit (chainstate/script-flags mainnet 481824 "ordinary")]
+    (is (= #{:p2sh :witness :taproot} before))
+    (is (contains? dersig :dersig))
+    (is (not (contains? dersig :cltv)))
+    (is (contains? segwit :null-dummy))
+    (is (= #{}
+           (chainstate/script-flags
+            mainnet 170060
+            "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22")))))
+
+(deftest bip9-versionbits-transitions-only-at-period-boundaries
+  (let [deployment {:start-time 100 :timeout 1000
+                    :min-activation-height 12
+                    :period 4 :threshold 3}]
+    (is (= :defined
+           (versionbits/next-state deployment 3 :defined 200 4)))
+    (is (= :started
+           (versionbits/next-state deployment 4 :defined 200 0)))
+    (is (= :locked-in
+           (versionbits/next-state deployment 8 :started 300 3)))
+    (is (= :started
+           (versionbits/next-state deployment 8 :started 300 2)))
+    (is (= :active
+           (versionbits/next-state deployment 12 :locked-in 400 0)))
+    (is (= :failed
+           (versionbits/next-state deployment 4 :defined 1000 4)))
+    (is (versionbits/signals? 0x20000004 2))
+    (is (not (versionbits/signals? 0x00000004 2)))))
+
+(deftest sigop-cost-counts-legacy-multisig-and-witness-units
+  (is (= 3 (script/sigop-count [0x52 0xae 0xac] true)))
+  (is (= 21 (script/sigop-count [0x52 0xae 0xac] false)))
+  (let [transaction
+        {:inputs [{:script-sig []}]
+         :outputs [{:script-pubkey [81]}]
+         :witnesses [[[1] [2]]]}
+        coin {:script-pubkey
+              (vec (concat [0 20] (repeat 20 7)))}]
+    (is (= 1
+           (script/transaction-sigop-cost
+            transaction [coin] #{:p2sh :witness}))))
+  (let [coinbase
+        {:txid-natural (vec (repeat 32 12))
+         :version 1
+         :inputs [{:txid-natural (vec (repeat 32 0))
+                   :vout 0xffffffff :script-sig [1 1]
+                   :sequence 0xffffffff}]
+         :outputs [{:value 1
+                    :script-pubkey (vec (repeat 1001 0xae))}]
+         :locktime 0}
+        options
+        {:sigop-cost-fn
+         #(script/transaction-sigop-cost %1 %2 #{:p2sh :witness})}]
+    (is (= :bitcoin.consensus/too-many-sigops
+           (error-type
+            #(utxo/apply-block
+              utxo/empty-state {:transactions [coinbase]} 1
+              (constantly true) options))))))
+
+(deftest official-bip341-keypath-sighash-and-signature-vector
+  (let [raw
+        (str
+         "02000000097de20cbff686da83a54981d2b9bab3586f4ca7e48f57f5b55963115f3b334e9c010000000000000000"
+         "d7b7cab57b1393ace2d064f4d4a2cb8af6def61273e127517d44759b6dafdd990000000000ffffffff"
+         "f8e1f583384333689228c5d28eac13366be082dc57441760d957275419a418420000000000ffffffff"
+         "f0689180aa63b30cb162a73c6d2a38b7eeda2a83ece74310fda0843ad604853b0100000000feffffff"
+         "aa5202bdf6d8ccd2ee0f0202afbbb7461d9264a25e5bfd3c5a52ee1239e0ba6c0000000000feffffff"
+         "956149bdc66faa968eb2be2d2faa29718acbfe3941215893a2a3446d32acd05000000000000000000"
+         "0e664b9773b88c09c32cb70a2a3e4da0ced63b7ba3b22f848531bbb1d5d5f4c94010000000000000000"
+         "e9aa6b8e6c9de67619e6a3924ae25696bb7b694bb677a632a74ef7eadfd4eabf0000000000ffffffff"
+         "a778eb6a263dc090464cd125c466b5a99667720b1c110468831d058aa1b82af10100000000ffffffff"
+         "0200ca9a3b000000001976a91406afd46bcdfd22ef94ac122aa11f241244a37ecc88ac"
+         "807840cb0000000020ac9a87f5594be208f8532db38cff670c450ed2fea8fcdefcc9a663f78bab962b0065cd1d")
+        parsed (transaction/parse (hex->bytes raw))
+        coin {:value 462000000
+              :script-pubkey
+              (hex->bytes
+               "5120147c9c57132f6e7ecddba9800bb0c4449251c92a1e60371ee77557b6620f3ea3")}
+        coins (assoc (vec (repeat 9 nil)) 1 coin)
+        signature
+        (hex->bytes
+         (str
+          "052aedffc554b41f52b521071793a6b88d6dbca9dba94cf34c83696de0c1ec35"
+          "ca9c5ed4ab28059bd606a4f3a657eec0bb96661d42921b5f50a95ad33675b54f83"))
+        digest (sighash/taproot-keypath parsed 1 coins 0x83 nil)
+        witnesses (assoc (vec (repeat 9 [])) 1 [signature])
+        signed (assoc parsed :prevout-coins coins :witnesses witnesses)]
+    (is (= "325a644af47e8a5a2591cda0ab0723978537318f10e6a63d4eed783b96a71a4d"
+           (apply str (map #(format "%02x" %) digest))))
+    (is (script/verify-input
+         signed 1 coin #{:p2sh :witness :taproot}))))
+
+(deftest taproot-script-path-validates-control-commitment-and-tapscript
+  (let [internal
+        (hex->bytes
+         "d6889cb081036e0faefa3a35157ad71086b123b2b144b649798b494c300a961d")
+        tapscript [0x51]
+        leaf-hash (schnorr/tagged-hash "TapLeaf" [0xc0 1 0x51])
+        tweaked (schnorr/tweak-public-key internal leaf-hash)
+        control (vec (concat [(+ 0xc0 (:parity tweaked))] internal))
+        coin {:value 1000
+              :script-pubkey
+              (vec (concat [0x51 0x20] (:x tweaked)))}
+        transaction
+        {:version 2
+         :inputs [{:txid-natural (vec (repeat 32 3))
+                   :vout 0 :script-sig [] :sequence 0xffffffff}]
+         :outputs [{:value 900 :script-pubkey [0x51]}]
+         :witnesses [[tapscript control]]
+         :prevout-coins [coin]
+         :locktime 0}]
+    (is (script/verify-input
+         transaction 0 coin #{:p2sh :witness :taproot}))
+    (is (= :bitcoin.consensus/taproot-control
+           (error-type
+            #(script/verify-input
+              (assoc-in transaction [:witnesses 0 1 1] 0)
+              0 coin #{:p2sh :witness :taproot}))))))
+
+(deftest tapscript-op-success-precedes-element-and-execution-limits
+  (let [internal
+        (hex->bytes
+         "d6889cb081036e0faefa3a35157ad71086b123b2b144b649798b494c300a961d")
+        fixture
+        (fn [tapscript]
+          (let [leaf-hash
+                (schnorr/tagged-hash
+                 "TapLeaf"
+                 (concat [0xc0] (codec/compact-size (count tapscript))
+                         tapscript))
+                tweaked (schnorr/tweak-public-key internal leaf-hash)
+                control
+                (vec (concat [(+ 0xc0 (:parity tweaked))] internal))
+                coin {:value 1000
+                      :script-pubkey
+                      (vec (concat [0x51 0x20] (:x tweaked)))}
+                transaction
+                {:version 2
+                 :inputs [{:txid-natural (vec (repeat 32 4))
+                           :vout 0 :script-sig []
+                           :sequence 0xffffffff}]
+                 :outputs [{:value 900 :script-pubkey [0x51]}]
+                 :witnesses [[tapscript control]]
+                 :prevout-coins [coin] :locktime 0}]
+            [transaction coin]))
+        oversized-push
+        (vec (concat [0x4d 0x09 0x02] (repeat 521 0)))
+        [success-transaction success-coin]
+        (fixture (conj oversized-push 0x50))
+        [failure-transaction failure-coin] (fixture oversized-push)]
+    (is (script/verify-input
+         success-transaction 0 success-coin
+         #{:p2sh :witness :taproot}))
+    (is (= :bitcoin.consensus/push-size
+           (error-type
+            #(script/verify-input
+              failure-transaction 0 failure-coin
+              #{:p2sh :witness :taproot}))))))
+
+(deftest script-stack-numeric-conditional-and-hash-opcode-conformance
+  (let [context
+        {:transaction
+         {:version 2 :locktime 10
+          :inputs [{:sequence 10}] :outputs []}
+         :input-index 0 :coin {:value 0 :script-pubkey []}
+         :sigversion :base :flags script/default-flags}
+        run #(script/evaluate [] % context)]
+    (doseq [[program expected]
+            [[[0x51 0x6b 0x6c] [[1]]]
+             [[0x51 0x52 0x6d] []]
+             [[0x51 0x52 0x6e] [[1] [2] [1] [2]]]
+             [[0x51 0x52 0x53 0x6f] [[1] [2] [3] [1] [2] [3]]]
+             [[0x51 0x52 0x53 0x54 0x70] [[1] [2] [3] [4] [1] [2]]]
+             [[0x51 0x52 0x53 0x54 0x55 0x56 0x71]
+              [[3] [4] [5] [6] [1] [2]]]
+             [[0x51 0x52 0x53 0x54 0x72] [[3] [4] [1] [2]]]
+             [[0x51 0x73] [[1] [1]]]
+             [[0x51 0x52 0x74] [[1] [2] [2]]]
+             [[0x51 0x52 0x75] [[1]]]
+             [[0x51 0x76] [[1] [1]]]
+             [[0x51 0x52 0x77] [[2]]]
+             [[0x51 0x52 0x78] [[1] [2] [1]]]
+             [[0x51 0x52 0x53 0x52 0x79] [[1] [2] [3] [1]]]
+             [[0x51 0x52 0x53 0x52 0x7a] [[2] [3] [1]]]
+             [[0x51 0x52 0x53 0x7b] [[2] [3] [1]]]
+             [[0x51 0x52 0x7c] [[2] [1]]]
+             [[0x51 0x52 0x7d] [[2] [1] [2]]]
+             [[3 1 2 3 0x82] [[1 2 3] [3]]]
+             [[0x51 0x51 0x87] [[1]]]
+             [[0x51 0x51 0x88] []]
+             [[0x00 0x63 0x6a 0x67 0x51 0x68] [[1]]]
+             [[0x00 0x64 0x51 0x68] [[1]]]
+             [[0x51 0x69] []]
+             [[0x61 0xb0 0xb3 0x51] [[1]]]]]
+      (is (= expected (run program)) (pr-str program)))
+    (doseq [[program expected]
+            [[[0x51 0x8b] [[2]]]
+             [[0x52 0x8c] [[1]]]
+             [[0x52 0x8f] [[0x82]]]
+             [[0x4f 0x90] [[1]]]
+             [[0x00 0x91] [[1]]]
+             [[0x00 0x92] [[]]]]]
+      (is (= expected (run program)) (pr-str program)))
+    (doseq [[program expected]
+            [[[0x52 0x53 0x93] [[5]]]
+             [[0x55 0x52 0x94] [[3]]]
+             [[0x51 0x52 0x9a] [[1]]]
+             [[0x00 0x52 0x9b] [[1]]]
+             [[0x52 0x52 0x9c] [[1]]]
+             [[0x52 0x52 0x9d] []]
+             [[0x52 0x53 0x9e] [[1]]]
+             [[0x52 0x53 0x9f] [[1]]]
+             [[0x53 0x52 0xa0] [[1]]]
+             [[0x52 0x52 0xa1] [[1]]]
+             [[0x53 0x52 0xa2] [[1]]]
+             [[0x52 0x53 0xa3] [[2]]]
+             [[0x52 0x53 0xa4] [[3]]]
+             [[0x52 0x51 0x53 0xa5] [[1]]]]]
+      (is (= expected (run program)) (pr-str program)))
+    (doseq [opcode [0xa6 0xa7 0xa8 0xa9 0xaa]]
+      (let [result (peek (run [3 1 2 3 opcode]))]
+        (is (= (if (contains? #{0xa6 0xa9} opcode) 20
+                   (if (= opcode 0xa7) 20 32))
+               (count result)))))
+    (is (= :bitcoin.consensus/disabled-opcode
+           (error-type #(run [0x7e]))))
+    (is (= :bitcoin.consensus/unbalanced-conditional
+           (error-type #(run [0x51 0x63]))))
+    (is (= :bitcoin.consensus/bad-opcode
+           (error-type #(run [0x65]))))))
 
 (deftest chainstate-atomically-reorganizes-to-the-most-work-regtest-fork
   (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))

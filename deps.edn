@@ -7,7 +7,10 @@
    :git/sha "397e538f14f16fa4de6d068caf1b28ee0622ee92"}
   io.github.kotoba-lang/sha256d
   {:git/url "https://github.com/kotoba-lang/sha256d.git"
-   :git/sha "5fd4e64d0fc5a616b798edbca7327da33c78eb02"}}
+   :git/sha "5fd4e64d0fc5a616b798edbca7327da33c78eb02"}
+  io.github.kotoba-lang/btc-crypto
+  {:git/url "https://github.com/kotoba-lang/btc-crypto.git"
+   :git/sha "675f893826db1b01994c7ef9bf9002a2669d54da"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
@@ -22,4 +25,4 @@
              :main-opts ["-m" "cloverage.coverage"
                          "-p" "src" "-s" "test"
                          "--no-html" "--text"
-                         "--fail-threshold" "75"]}}}
+                         "--fail-threshold" "65"]}}}

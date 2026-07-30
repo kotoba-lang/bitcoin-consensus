@@ -22,11 +22,14 @@
      next-offset]))
 
 (defn uint-le [value length]
-  (loop [value value remaining length result []]
+  (let [value (if (neg? value)
+                (+ value (reduce * 1N (repeat length 256)))
+                value)]
+   (loop [value value remaining length result []]
     (if (zero? remaining)
       result
       (recur (quot value 256) (dec remaining)
-             (conj result (int (mod value 256)))))))
+             (conj result (int (mod value 256))))))))
 
 (defn read-compact-size
   "Decode a canonical CompactSize and return [value next-offset]."

@@ -2,46 +2,134 @@
   "Pure most-work block tree with atomic UTXO reorganization."
   (:require [bitcoin.consensus.block :as block]
             [bitcoin.consensus.codec :as codec]
+            #?(:clj [bitcoin.consensus.script :as script])
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
+            [bitcoin.consensus.versionbits :as versionbits]
             [kotobase.bitcoin.protocol :as header]))
 
 (def consensus-parameters
   {:mainnet {:bip34-height 227931
+             :bip65-height 388381
+             :bip66-height 363725
+             :csv-height 419328
              :bip113-height 419328
-             :segwit-height 481824}
+             :segwit-height 481824
+             :taproot-height 709632
+             :taproot-deployment
+             {:bit 2 :start-time 1619222400 :timeout 1628640000
+              :min-activation-height 709632 :threshold 1815 :period 2016}
+             :halving-interval 210000
+             :script-flag-exceptions
+             {"00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"
+              #{}
+              "0000000000000000000f14c35b2d841e986ab5441de8c585d5ffe55ea1e395ad"
+              #{:p2sh :witness}}}
    :testnet {:bip34-height 21111
+             :bip65-height 581885
+             :bip66-height 330776
+             :csv-height 770112
              :bip113-height 770112
-             :segwit-height 834624}
-   :regtest {:bip34-height 500
-             :bip113-height 432
-             :segwit-height 0}})
+             :segwit-height 834624
+             ;; Taproot activation is versionbits-derived on testnet.
+             :taproot-height nil
+             :taproot-deployment
+             {:bit 2 :start-time 1619222400 :timeout 1628640000
+              :min-activation-height 0 :threshold 1512 :period 2016}
+             :halving-interval 210000
+             :script-flag-exceptions
+             {"00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105"
+              #{}}}
+   :regtest {:bip34-height 1
+             :bip65-height 1
+             :bip66-height 1
+             :csv-height 1
+             :bip113-height 1
+             :segwit-height 0
+             :taproot-height 0
+             :taproot-deployment {:always-active? true}
+             :halving-interval 150
+             :script-flag-exceptions {}}})
+
+(def bip30-repeat-blocks
+  #{"00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec"
+    "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721"})
+
+(defn script-flags
+  "Bitcoin Core block-consensus Script flags for a known deployment state."
+  [{:keys [bip65-height bip66-height csv-height segwit-height
+           script-flag-exceptions]}
+   height block-hash]
+  (or (get script-flag-exceptions block-hash)
+      (cond-> #{:p2sh :witness :taproot}
+        (>= height bip66-height) (conj :dersig)
+        (>= height bip65-height) (conj :cltv)
+        (>= height csv-height) (conj :csv)
+        (>= height segwit-height) (conj :null-dummy))))
+
+#?(:clj
+   (defn- verifier-for
+     [state height block-hash override]
+     (or override
+         (let [flags (script-flags (:consensus state) height block-hash)]
+           (fn [transaction input-index coin]
+             (script/verify-input transaction input-index coin flags)))))
+   :cljs
+   (defn- verifier-for
+     [_state _height _block-hash override]
+     (or override
+         (codec/fail! :bitcoin.consensus/missing-script-verifier
+                      "The built-in Script VM is currently JVM-only." {}))))
+
+#?(:clj
+   (defn- sigop-counter
+     [parameters height block-hash]
+     (let [flags (script-flags parameters height block-hash)]
+       (fn [transaction coins]
+         (script/transaction-sigop-cost transaction coins flags))))
+   :cljs
+   (defn- sigop-counter [_parameters _height _block-hash] nil))
 
 (defn- parent-hash [parsed-block]
   (header/natural-hash->hex (get-in parsed-block [:header :prev-block])))
 
 (defn initialize
   "Create chainstate from the network's actual genesis block."
-  [network genesis-block verify-script]
-  (let [expected (header/genesis-header network)
+  ([network genesis-block]
+   (initialize network genesis-block nil))
+  ([network genesis-block verify-script]
+   (let [expected (header/genesis-header network)
         actual (:header genesis-block)]
     (when-not (= (:hash expected) (:hash actual))
       (codec/fail! :bitcoin.consensus/wrong-genesis
                    "Genesis block does not match the configured network."
                    {:network network :actual (:hash-hex actual)}))
-    (let [{utxo-state :state undo :undo}
+    (let [base-state {:network network
+                      :consensus (get consensus-parameters network)}
+          taproot-active?
+          (true? (get-in base-state
+                         [:consensus :taproot-deployment :always-active?]))
+          verifier (verifier-for base-state 0 (:hash-hex actual)
+                                 verify-script)
+          {utxo-state :state undo :undo}
           (utxo/apply-block-with-undo
-           utxo/empty-state genesis-block 0 verify-script)
+           utxo/empty-state genesis-block 0 verifier
+           {:sigop-cost-fn
+            (sigop-counter (:consensus base-state) 0 (:hash-hex actual))
+            :halving-interval
+            (get-in base-state [:consensus :halving-interval])})
           hash (:hash-hex actual)
           chainwork (header/header-work (:bits actual))]
       {:network network
-       :consensus (get consensus-parameters network)
+       :consensus (:consensus base-state)
        :active-tip hash
        :utxo utxo-state
        :nodes {hash {:hash hash :parent nil :height 0
                      :header actual :block genesis-block
                      :chainwork chainwork :undo undo
-                     :active? true :block-valid? true}}})))
+                     :deployments
+                     {:taproot (if taproot-active? :active :defined)}
+                     :active? true :block-valid? true}}}))))
 
 (defn- ancestor-nodes [state hash limit]
   (loop [hash hash remaining limit newest []]
@@ -107,6 +195,44 @@
               (ancestor-nodes state parent 11)))]
     (nth timestamps (quot (count timestamps) 2))))
 
+(defn- ancestor-at-height [state tip height]
+  (loop [hash tip]
+    (let [node (get-in state [:nodes hash])]
+      (cond
+        (nil? node) nil
+        (= height (:height node)) node
+        (< (:height node) height) nil
+        :else (recur (:parent node))))))
+
+(defn- median-time-past-at-height [state height]
+  (let [node (ancestor-at-height state (:active-tip state) height)]
+    (when-not node
+      (codec/fail! :bitcoin.consensus/missing-locktime-ancestor
+                   "BIP68 coin ancestor is unavailable."
+                   {:height height}))
+    (median-time-past state (:hash node))))
+
+(defn- next-taproot-state [state parent-node height]
+  (let [deployment (get-in state [:consensus :taproot-deployment])
+        parent-state (get-in parent-node [:deployments :taproot] :defined)]
+    (cond
+      (:always-active? deployment) :active
+      (nil? (:period deployment)) parent-state
+      :else
+      (let [period (:period deployment)
+            signal-count
+            (if (zero? (mod height period))
+              (count
+               (filter
+                #(versionbits/signals?
+                  (get-in % [:header :version]) (:bit deployment))
+                (ancestor-nodes state (:hash parent-node) period)))
+              0)]
+        (versionbits/next-state
+         deployment height parent-state
+         (median-time-past state (:hash parent-node))
+         signal-count)))))
+
 (defn- validate-block-context! [state parsed-block parent-node]
   (let [height (inc (:height parent-node))
         {:keys [bip34-height bip113-height segwit-height]}
@@ -165,10 +291,26 @@
     (reduce
      (fn [current-state hash]
        (let [node (get-in current-state [:nodes hash])
+             height (:height node)
+             verifier (verifier-for current-state height hash verify-script)
+             csv-active? (>= height
+                             (get-in current-state
+                                     [:consensus :csv-height]))
+             parent-mtp (median-time-past current-state
+                                          (:active-tip current-state))
              {next-utxo :state undo :undo}
              (utxo/apply-block-with-undo
-              (:utxo current-state) (:block node) (:height node)
-              verify-script)]
+              (:utxo current-state) (:block node) height verifier
+              {:sequence-locks? csv-active?
+               :allow-bip30-overwrite?
+               (contains? bip30-repeat-blocks hash)
+               :halving-interval
+               (get-in current-state [:consensus :halving-interval])
+               :parent-mtp parent-mtp
+               :sigop-cost-fn
+               (sigop-counter (:consensus current-state) height hash)
+               :coin-mtp
+               #(median-time-past-at-height current-state %)})]
          (-> current-state
              (assoc :utxo next-utxo :active-tip hash)
              (assoc-in [:nodes hash :undo] undo)
@@ -179,8 +321,10 @@
 (defn accept-block
   "Validate and add a parsed block, activating it atomically only when its
   cumulative work exceeds the current active tip."
-  [state parsed-block now verify-script]
-  (let [hash (get-in parsed-block [:header :hash-hex])]
+  ([state parsed-block now]
+   (accept-block state parsed-block now nil))
+  ([state parsed-block now verify-script]
+   (let [hash (get-in parsed-block [:header :hash-hex])]
     (if (contains? (:nodes state) hash)
       state
       (let [parent-node (validate-header! state parsed-block now)
@@ -188,6 +332,10 @@
             node {:hash hash :parent (:hash parent-node)
                   :height (inc (:height parent-node))
                   :header (:header parsed-block) :block parsed-block
+                  :deployments
+                  {:taproot
+                   (next-taproot-state
+                    state parent-node (inc (:height parent-node)))}
                   :chainwork
                   (header/add-chainwork
                    (:chainwork parent-node)
@@ -199,7 +347,7 @@
                                        :chainwork])]
         (if (header/better-chain? (:chainwork node) active-work)
           (activate-tip added hash verify-script)
-          added)))))
+          added))))))
 
 (defn active-height [state]
   (get-in state [:nodes (:active-tip state) :height]))

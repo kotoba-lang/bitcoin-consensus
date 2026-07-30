@@ -11,6 +11,15 @@
 (def max-witness-item-bytes 4000000)
 (def locktime-threshold 500000000)
 (def final-sequence 0xffffffff)
+(def sequence-locktime-disable-flag 0x80000000)
+(def sequence-locktime-type-flag 0x00400000)
+(def sequence-locktime-mask 0x0000ffff)
+(def sequence-locktime-granularity 9)
+
+(defn- signed-int32 [value]
+  (if (>= value 0x80000000)
+    (- value 0x100000000)
+    value))
 
 (defn- read-input [bytes offset]
   (let [[txid offset] (codec/read-bytes bytes offset 32)
@@ -90,6 +99,7 @@
 
 (defn parse-at [bytes start]
   (let [[version offset] (codec/read-uint-le bytes start 4)
+        version (signed-int32 version)
         [first-count after-first] (codec/read-compact-size bytes offset)
         segwit? (and (zero? first-count)
                      (< after-first (count bytes))
@@ -188,3 +198,36 @@
         (< locktime comparison)
         (every? #(= final-sequence (:sequence %))
                 (:inputs transaction)))))
+
+(defn calculate-sequence-locks
+  "Return BIP68's last-invalid {:height :time} pair.
+
+  `prev-heights` and `coin-mtp` are supplied by the UTXO/chain view. coin-mtp
+  receives max(coin-height - 1, 0), matching Bitcoin Core."
+  [transaction prev-heights coin-mtp]
+  (if (< (:version transaction) 2)
+    {:height -1 :time -1}
+    (reduce
+     (fn [{:keys [height time] :as result} [input coin-height]]
+       (let [sequence (:sequence input)]
+         (if (not (zero? (bit-and sequence
+                                  sequence-locktime-disable-flag)))
+           result
+           (let [relative (bit-and sequence sequence-locktime-mask)]
+             (if (not (zero? (bit-and sequence
+                                      sequence-locktime-type-flag)))
+               (assoc result :time
+                      (max time
+                           (dec (+ (coin-mtp (max (dec coin-height) 0))
+                                   (bit-shift-left
+                                    relative sequence-locktime-granularity)))))
+               (assoc result :height
+                      (max height (dec (+ coin-height relative)))))))))
+     {:height -1 :time -1}
+     (map vector (:inputs transaction) prev-heights))))
+
+(defn sequence-locks-satisfied?
+  "Evaluate BIP68 locks for a candidate block height and its parent MTP."
+  [{:keys [height time]} block-height parent-mtp]
+  (and (< height block-height)
+       (< time parent-mtp)))
