@@ -1,0 +1,190 @@
+(ns bitcoin.consensus.transaction
+  "Canonical legacy/SegWit transaction parsing and identifiers."
+  (:require [bitcoin.consensus.codec :as codec]
+            [sha256d.core :as sha256d]))
+
+(def max-money 2100000000000000)
+(def max-script-bytes 10000)
+(def max-inputs 100000)
+(def max-outputs 100000)
+(def max-witness-items 100000)
+(def max-witness-item-bytes 4000000)
+(def locktime-threshold 500000000)
+(def final-sequence 0xffffffff)
+
+(defn- read-input [bytes offset]
+  (let [[txid offset] (codec/read-bytes bytes offset 32)
+        [vout offset] (codec/read-uint-le bytes offset 4)
+        [script-sig offset]
+        (codec/read-var-bytes bytes offset max-script-bytes "scriptSig")
+        [sequence offset] (codec/read-uint-le bytes offset 4)]
+    [{:txid-natural txid :vout vout :script-sig script-sig
+      :sequence sequence}
+     offset]))
+
+(defn- read-output [bytes offset]
+  (let [[value offset] (codec/read-uint-le bytes offset 8)
+        _ (when (> value max-money)
+            (codec/fail! :bitcoin.consensus/amount-out-of-range
+                         "Transaction output exceeds MAX_MONEY."
+                         {:value value}))
+        [script-pubkey offset]
+        (codec/read-var-bytes bytes offset max-script-bytes "scriptPubKey")]
+    [{:value value :script-pubkey script-pubkey} offset]))
+
+(defn- read-many [reader bytes offset count-value limit label]
+  (when (> count-value limit)
+    (codec/fail! :bitcoin.consensus/resource-limit
+                 (str label " count exceeds its resource limit.")
+                 {:count count-value :limit limit}))
+  (loop [index 0 offset offset result []]
+    (if (= index count-value)
+      [result offset]
+      (let [[value next-offset] (reader bytes offset)]
+        (recur (inc index) next-offset (conj result value))))))
+
+(defn- read-witness [bytes offset]
+  (let [[item-count offset] (codec/read-compact-size bytes offset)]
+    (when (> item-count max-witness-items)
+      (codec/fail! :bitcoin.consensus/resource-limit
+                   "Witness item count exceeds its resource limit."
+                   {:count item-count :limit max-witness-items}))
+    (loop [index 0 offset offset items []]
+      (if (= index item-count)
+        [items offset]
+        (let [[item next-offset]
+              (codec/read-var-bytes bytes offset max-witness-item-bytes
+                                    "witness item")]
+          (recur (inc index) next-offset (conj items item)))))))
+
+(defn serialize-input [{:keys [txid-natural vout script-sig sequence]}]
+  (vec (concat txid-natural
+               (codec/uint-le vout 4)
+               (codec/compact-size (count script-sig)) script-sig
+               (codec/uint-le sequence 4))))
+
+(defn serialize-output [{:keys [value script-pubkey]}]
+  (vec (concat (codec/uint-le value 8)
+               (codec/compact-size (count script-pubkey)) script-pubkey)))
+
+(defn serialize
+  ([transaction] (serialize transaction true))
+  ([{:keys [version inputs outputs witnesses locktime segwit?]} witness?]
+   (let [include-witness? (and witness? segwit?)
+         witness-values (or witnesses (repeat (count inputs) []))]
+     (vec
+      (concat
+       (codec/uint-le version 4)
+       (when include-witness? [0 1])
+       (codec/compact-size (count inputs))
+       (mapcat serialize-input inputs)
+       (codec/compact-size (count outputs))
+       (mapcat serialize-output outputs)
+       (when include-witness?
+         (mapcat
+          (fn [items]
+            (concat (codec/compact-size (count items))
+                    (mapcat #(concat (codec/compact-size (count %)) %) items)))
+          witness-values))
+       (codec/uint-le locktime 4))))))
+
+(defn parse-at [bytes start]
+  (let [[version offset] (codec/read-uint-le bytes start 4)
+        [first-count after-first] (codec/read-compact-size bytes offset)
+        segwit? (and (zero? first-count)
+                     (< after-first (count bytes))
+                     (not (zero? (nth bytes after-first))))
+        [input-count offset]
+        (if segwit?
+          (let [[flag next-offset] (codec/read-uint-le bytes after-first 1)]
+            (when-not (= flag 1)
+              (codec/fail! :bitcoin.consensus/unknown-witness-flag
+                           "Unknown transaction witness flag."
+                           {:flag flag}))
+            (codec/read-compact-size bytes next-offset))
+          [first-count after-first])
+        _ (when (zero? input-count)
+            (codec/fail! :bitcoin.consensus/empty-inputs
+                         "Transaction must contain an input." {}))
+        [inputs offset]
+        (read-many read-input bytes offset input-count max-inputs "input")
+        [output-count offset] (codec/read-compact-size bytes offset)
+        _ (when (zero? output-count)
+            (codec/fail! :bitcoin.consensus/empty-outputs
+                         "Transaction must contain an output." {}))
+        [outputs offset]
+        (read-many read-output bytes offset output-count max-outputs "output")
+        [witnesses offset]
+        (if segwit?
+          (read-many (fn [data position] (read-witness data position))
+                     bytes offset input-count max-inputs "witness")
+          [nil offset])
+        _ (when (and segwit? (every? empty? witnesses))
+            (codec/fail! :bitcoin.consensus/superfluous-witness
+                         "SegWit marker/flag has no witness data." {}))
+        [locktime end] (codec/read-uint-le bytes offset 4)
+        transaction {:version version :inputs inputs :outputs outputs
+                     :witnesses witnesses :locktime locktime :segwit? segwit?}
+        stripped (serialize transaction false)
+        full (subvec bytes start end)]
+    [(assoc transaction
+            :raw full :stripped stripped
+            :txid-natural (vec (sha256d/sha256d-bytes stripped))
+            :wtxid-natural (vec (sha256d/sha256d-bytes full))
+            :base-size (count stripped) :total-size (count full)
+            :weight (+ (* 3 (count stripped)) (count full)))
+     end]))
+
+(defn parse [bytes]
+  (let [[transaction offset] (parse-at (vec bytes) 0)]
+    (when-not (= offset (count bytes))
+      (codec/fail! :bitcoin.consensus/trailing-data
+                   "Transaction has trailing data."
+                   {:offset offset :length (count bytes)}))
+    transaction))
+
+(defn coinbase? [{:keys [inputs]}]
+  (and (= 1 (count inputs))
+       (every? zero? (:txid-natural (first inputs)))
+       (= 0xffffffff (:vout (first inputs)))))
+
+(defn output-value [transaction]
+  (reduce + 0 (map :value (:outputs transaction))))
+
+(defn- null-outpoint? [{:keys [txid-natural vout]}]
+  (and (every? zero? txid-natural) (= 0xffffffff vout)))
+
+(defn validate-context-free!
+  "Apply Bitcoin Core's transaction checks that do not need a UTXO view."
+  [transaction]
+  (let [inputs (:inputs transaction)
+        total-output (output-value transaction)
+        outpoints (mapv (juxt :txid-natural :vout) inputs)]
+    (when (> total-output max-money)
+      (codec/fail! :bitcoin.consensus/amount-out-of-range
+                   "Transaction output total exceeds MAX_MONEY."
+                   {:value total-output}))
+    (if (coinbase? transaction)
+      (let [script-size (count (:script-sig (first inputs)))]
+        (when-not (<= 2 script-size 100)
+          (codec/fail! :bitcoin.consensus/bad-coinbase-script-size
+                       "Coinbase scriptSig must contain 2 through 100 bytes."
+                       {:size script-size})))
+      (when (some null-outpoint? inputs)
+        (codec/fail! :bitcoin.consensus/null-prevout
+                     "A non-coinbase transaction has a null prevout." {})))
+    (when-not (= (count outpoints) (count (set outpoints)))
+      (codec/fail! :bitcoin.consensus/duplicate-input
+                   "Transaction contains duplicate inputs." {}))
+    transaction))
+
+(defn final?
+  "Whether a transaction is final for a candidate block height/time."
+  [transaction block-height block-time]
+  (let [locktime (:locktime transaction)
+        comparison (if (< locktime locktime-threshold)
+                     block-height block-time)]
+    (or (zero? locktime)
+        (< locktime comparison)
+        (every? #(= final-sequence (:sequence %))
+                (:inputs transaction)))))
