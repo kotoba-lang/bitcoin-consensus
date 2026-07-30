@@ -414,7 +414,10 @@
 (defn import-snapshot!
   "Stream an authenticated Core v2 AssumeUTXO snapshot directly into SQLite.
   No Clojure map proportional to the UTXO set is created. Authentication
-  failure rolls back every inserted coin."
+  failure rolls back every inserted coin.
+
+  `:host-state-fn`, when present, receives the authenticated non-materialized
+  state and returns host-state bytes committed in the same transaction."
   ([backend source header-at-height]
    (import-snapshot! backend source header-at-height {}))
   ([backend source header-at-height options]
@@ -429,18 +432,22 @@
              (fail! :bitcoin.consensus/sqlite-snapshot-nonempty
                     "AssumeUTXO import requires an empty UTXO database."
                     {:coin-count current-count}))
-           (let [loaded
+           (let [host-state-fn (:host-state-fn options)
+                 loaded
                  (assumeutxo/load-snapshot
                   source (:network backend) header-at-height
-                  (assoc options
-                         :materialize? false
-                         :coin-consumer
-                         #(insert-coin! connection %1 %2)))
+                  (-> options
+                      (dissoc :host-state-fn)
+                      (assoc :materialize? false
+                             :coin-consumer
+                             #(insert-coin! connection %1 %2))))
                  {:keys [base-height base-blockhash coins-count]}
                  (:snapshot loaded)]
              (put-meta! connection "height" base-height)
              (put-meta! connection "tip" base-blockhash)
              (put-meta! connection "coin_count" coins-count)
+             (when host-state-fn
+               (write-host-state! connection (host-state-fn loaded)))
              (.commit connection)
              (:snapshot loaded)))
          (catch Throwable error

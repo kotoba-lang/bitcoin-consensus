@@ -55,8 +55,9 @@ to `:validated` additionally requires a full background chainstate match.
 This is still not a drop-in Bitcoin Core replacement. All 1,222 upstream Script
 vectors run in CI with exact success/failure parity, including Core-generated
 Taproot fixtures and policy flags. The mainnet-sized disk UTXO/undo backend is
-available, but selecting it in the higher-level `bitcoin-node` host and
-completing a full genesis-to-tip historical differential run remain required.
+integrated by `bitcoin-node` with atomic fork-choice metadata and snapshot-start
+support. Completing a full genesis-to-tip mainnet historical differential run
+remains required.
 Script, AssumeUTXO, and persistence adapters are currently JVM-only;
 wire codecs, consensus values, BIP9, headers-first state, and scheduling remain
 portable Clojure/ClojureScript values.

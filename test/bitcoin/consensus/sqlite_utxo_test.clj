@@ -277,3 +277,27 @@
         (is (= coin-a (sqlite/lookup backend [txid-a 0])))
         (is (= {:network :regtest :height 2 :tip base-hash :coin-count 1}
                (sqlite/status backend)))))))
+
+(deftest snapshot-and-host-state-share-one-commit
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            base-hash (apply str (repeat 64 "4"))
+            entry [[txid-a 0] coin-a]
+            commitment (assumeutxo/hash-serialized {[txid-a 0] coin-a})
+            snapshot (snapshot-bytes base-hash entry)
+            host-bytes (.getBytes "atomic-host-state")
+            options
+            {:checkpoints
+             {2 {:blockhash base-hash
+                 :hash-serialized commitment
+                 :chain-tx-count 3}}
+             :host-state-fn
+             (fn [loaded]
+               (is (nil? (get-in loaded [:utxo :coins])))
+               host-bytes)}]
+        (sqlite/import-snapshot!
+         backend snapshot #(when (= % 2) base-hash) options)
+        (is (= (seq host-bytes) (seq (sqlite/host-state backend))))
+        (is (= base-hash (:tip (sqlite/status backend))))
+        (is (= coin-a (sqlite/lookup backend [txid-a 0])))))))

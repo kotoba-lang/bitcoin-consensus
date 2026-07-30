@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1 — 2026-07-30
+
+- Persist AssumeUTXO trust/status metadata in checksummed chainstate so a
+  restart cannot silently forget pending background validation.
+- Commit checksummed host/fork state in the same SQLite transaction as an
+  authenticated constant-memory snapshot import.
+
 ## 0.7.0 — 2026-07-30
 
 - Add Bitcoin Core v31.1 testnet4 consensus parameters, BIP94 header

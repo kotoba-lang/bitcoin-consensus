@@ -1119,6 +1119,19 @@
         (Files/deleteIfExists path)
         (Files/deleteIfExists directory)))))
 
+(deftest chainstate-persistence-retains-assumeutxo-trust-status
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        state
+        (assoc (chainstate/initialize :regtest genesis)
+               :snapshot
+               {:status :assumed :network :regtest :base-height 0
+                :base-blockhash (get-in genesis [:header :hash-hex])
+                :hash-serialized (apply str (repeat 64 "0"))
+                :coins-count 1 :chain-tx-count 1})
+        decoded (storage/decode (storage/encode state) :regtest)]
+    (is (= (:snapshot state) (:snapshot decoded)))
+    (is (= :assumed (get-in decoded [:snapshot :status])))))
+
 (deftest core-v2-assumeutxo-snapshot-is-authenticated-before-use
   (let [base-hash (apply str (repeat 64 "a"))
         coins

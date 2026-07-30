@@ -16,13 +16,16 @@
     (apply str (map #(format "%02x" (bit-and 0xff %)) digest))))
 
 (defn- state-payload [state]
-  {:format format-version
-   :network (:network state)
-   :consensus (:consensus state)
-   :active-tip (:active-tip state)
-   :best-header (:best-header state)
-   :utxo (:utxo state)
-   :nodes (:nodes state)})
+  (cond->
+   {:format format-version
+    :network (:network state)
+    :consensus (:consensus state)
+    :active-tip (:active-tip state)
+    :best-header (:best-header state)
+    :utxo (:utxo state)
+    :nodes (:nodes state)}
+    (some? (:snapshot state))
+    (assoc :snapshot (:snapshot state))))
 
 (defn encode
   "Encode chainstate as checksum-newline-EDN bytes."
