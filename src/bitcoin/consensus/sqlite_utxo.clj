@@ -401,17 +401,25 @@
          (rollback! view)
          (throw error))))))
 
-(defn- insert-coin! [connection [txid vout] coin]
-  (execute!
-   connection
-   "INSERT INTO consensus_coins(txid, vout, value, script, height, coinbase)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(txid, vout) DO UPDATE SET
-      value=excluded.value, script=excluded.script,
-      height=excluded.height, coinbase=excluded.coinbase"
-   [(txid-bytes txid) (long vout) (long (:value coin))
-    (byte-array (map unchecked-byte (:script-pubkey coin)))
-    (long (:height coin)) (if (:coinbase? coin) 1 0)]))
+(def ^:private upsert-coin-sql
+  "INSERT INTO consensus_coins(txid, vout, value, script, height, coinbase)
+   VALUES (?, ?, ?, ?, ?, ?)
+   ON CONFLICT(txid, vout) DO UPDATE SET
+     value=excluded.value, script=excluded.script,
+     height=excluded.height, coinbase=excluded.coinbase")
+
+(defn- coin-params [[txid vout] coin]
+  [(txid-bytes txid) (long vout) (long (:value coin))
+   (byte-array (map unchecked-byte (:script-pubkey coin)))
+   (long (:height coin)) (if (:coinbase? coin) 1 0)])
+
+(defn- insert-coin-statement!
+  [^PreparedStatement statement outpoint coin]
+  (bind! statement (coin-params outpoint coin))
+  (.executeUpdate statement))
+
+(defn- insert-coin! [connection outpoint coin]
+  (execute! connection upsert-coin-sql (coin-params outpoint coin)))
 
 (defn- delete-coin! [connection [txid vout]]
   (execute! connection
@@ -1022,7 +1030,9 @@
   ([backend source header-at-height]
    (import-snapshot! backend source header-at-height {}))
   ([backend source header-at-height options]
-   (with-open [connection (connection backend)]
+   (with-open [connection (connection backend)
+               coin-statement
+               (.prepareStatement ^Connection connection upsert-coin-sql)]
      (let [auto-commit (.getAutoCommit connection)]
        (try
          (.setAutoCommit connection false)
@@ -1043,7 +1053,8 @@
                       (dissoc :host-state-fn :header-nodes :header-nodes-fn)
                       (assoc :materialize? false
                              :coin-consumer
-                             #(insert-coin! connection %1 %2))))
+                             #(insert-coin-statement!
+                               coin-statement %1 %2))))
                  {:keys [base-height base-blockhash coins-count]}
                  (:snapshot loaded)]
              (put-meta! connection "height" base-height)

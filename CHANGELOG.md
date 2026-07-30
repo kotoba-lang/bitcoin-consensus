@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.15.0 — 2026-07-31
+
+- Reuse one prepared upsert statement for the complete authenticated
+  AssumeUTXO coin stream instead of preparing SQL once per coin.
+- Preserve constant-memory streaming and the single atomic authentication
+  transaction while removing tens of millions of redundant SQLite prepares
+  on mainnet snapshots.
+
 ## 0.14.0 — 2026-07-31
 
 - Add normalized-header ancestry cursors that reuse one SQLite connection and
