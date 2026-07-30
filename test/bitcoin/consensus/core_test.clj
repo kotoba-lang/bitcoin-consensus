@@ -693,7 +693,9 @@
            (:active-tip connected)))
     (is (true? (get-in connected
                        [:nodes (:active-tip connected) :block-valid?])))
-    (is (= 2 (count (get-in connected [:utxo :coins]))))))
+    (is (empty? (get-in initial [:utxo :coins]))
+        "Core never inserts the genesis coinbase into its UTXO set")
+    (is (= 1 (count (get-in connected [:utxo :coins]))))))
 
 (deftest testnet4-genesis-and-always-active-deployments-are-supported
   (let [state (chainstate/initialize :testnet4 testnet4-genesis-block)]
@@ -1072,7 +1074,7 @@
                          :block-valid?])))
     (is (= 3 (chainstate/active-height reorganized)))
     (is (= (get-in b3 [:header :hash-hex]) (:active-tip reorganized)))
-    (is (= 4 (count (get-in reorganized [:utxo :coins]))))
+    (is (= 3 (count (get-in reorganized [:utxo :coins]))))
     (is (nil? (get-in reorganized
                       [:utxo :coins
                        [(get-in a1 [:transactions 0 :txid-natural]) 0]])))

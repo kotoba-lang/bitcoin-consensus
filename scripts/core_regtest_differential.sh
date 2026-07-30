@@ -115,6 +115,7 @@ result="$(
             (vreset!
              chainstate
              (bitcoin.consensus.storage/load! path :regtest)))))
+      (bitcoin.consensus.storage/save! path @chainstate)
       (println
        (str "verified=" (count lines)
             " active-height="
@@ -145,8 +146,10 @@ snapshot_result="$(
   CONSENSUS_SNAPSHOT_COMMITMENT="$snapshot_commitment" \
   CONSENSUS_SNAPSHOT_CHAIN_TXS="$snapshot_chain_txs" \
   CONSENSUS_SNAPSHOT_COINS="$snapshot_coins" \
+  CONSENSUS_CHAINSTATE_PATH="$chainstate_path" \
   clojure -M -e '
-    (require (quote bitcoin.consensus.assumeutxo))
+    (require (quote bitcoin.consensus.assumeutxo)
+             (quote bitcoin.consensus.storage))
     (let [environment #(System/getenv %)
           path (environment "CONSENSUS_SNAPSHOT_PATH")
           base (environment "CONSENSUS_SNAPSHOT_BASE")
@@ -154,6 +157,7 @@ snapshot_result="$(
           commitment (environment "CONSENSUS_SNAPSHOT_COMMITMENT")
           chain-txs (environment "CONSENSUS_SNAPSHOT_CHAIN_TXS")
           expected-coins (environment "CONSENSUS_SNAPSHOT_COINS")
+          chainstate-path (environment "CONSENSUS_CHAINSTATE_PATH")
           height (parse-long height)
           loaded
           (bitcoin.consensus.assumeutxo/load-snapshot
@@ -165,6 +169,15 @@ snapshot_result="$(
             {height {:blockhash base
                      :hash-serialized commitment
                      :chain-tx-count (parse-long chain-txs)}}})]
+      (let [background
+            (bitcoin.consensus.storage/load! chainstate-path :regtest)
+            background-hash
+            (bitcoin.consensus.assumeutxo/hash-serialized
+             (get-in background [:utxo :coins]))]
+        (when-not (= commitment background-hash)
+          (throw
+           (ex-info "Core/background UTXO commitment mismatch"
+                    {:expected commitment :actual background-hash}))))
       (when-not (= (parse-long expected-coins)
                    (get-in loaded [:snapshot :coins-count]))
         (throw (ex-info "Snapshot coin count mismatch" {})))

@@ -178,13 +178,17 @@
                          [:consensus :taproot-deployment :always-active?]))
           verifier (verifier-for base-state 0 (:hash-hex actual)
                                  verify-script)
-          {utxo-state :state undo :undo}
+          {validated-genesis :state}
           (utxo/apply-block-with-undo
            utxo/empty-state genesis-block 0 verifier
            {:sigop-cost-fn
             (sigop-counter (:consensus base-state) 0 (:hash-hex actual))
             :halving-interval
             (get-in base-state [:consensus :halving-interval])})
+          ;; Core indexes the genesis block but never connects its transaction
+          ;; to CoinsDB. The genesis coinbase is therefore absent forever.
+          utxo-state (assoc validated-genesis :coins {})
+          undo {:height -1 :spent {} :created #{}}
           hash (:hash-hex actual)
           chainwork (header/header-work (:bits actual))]
       {:network network

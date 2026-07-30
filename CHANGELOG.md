@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.3 — 2026-07-30
+
+- Match Bitcoin Core genesis semantics: validate and index genesis, but never
+  insert its coinbase transaction into the UTXO set.
+- Make background HASH_SERIALIZED validation compatible with real
+  Core-generated snapshots instead of only self-generated fixtures.
+- Require the live Core regtest differential to match the independently
+  validated full-chain UTXO commitment against Core's dumped snapshot.
+
 ## 0.7.2 — 2026-07-30
 
 - Recompute Bitcoin Core HASH_SERIALIZED directly from the ordered SQLite UTXO
