@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.0 — 2026-07-31
+
+- Allow storage-backed block hosts to resolve distant ancestor nodes for
+  AssumeValid and BIP68 checks without reopening normalized SQLite storage for
+  every intermediate header.
+
 ## 0.15.0 — 2026-07-31
 
 - Reuse one prepared upsert statement for the complete authenticated

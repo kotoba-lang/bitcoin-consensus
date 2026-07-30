@@ -331,44 +331,52 @@
 
 (defn assumevalid-script-check?
   "Return true when Script must be checked under Bitcoin Core's assumevalid
-  safety gates. All non-Script consensus checks remain mandatory."
-  [state block-hash]
-  (let [{:keys [assume-valid-hash minimum-chainwork]} (:consensus state)
-        block-node (get-in state [:nodes block-hash])
-        assumed-node (get-in state [:nodes assume-valid-hash])
-        best-node (get-in state [:nodes (:best-header state)])
-        in-assumed-chain?
-        (and assumed-node block-node
-             (= block-hash
-                (:hash
-                 (ancestor-at-height state assume-valid-hash
-                                     (:height block-node)))))
-        in-best-chain?
-        (and best-node block-node
-             (= block-hash
-                (:hash
-                 (ancestor-at-height state (:hash best-node)
-                                     (:height block-node)))))
-        sufficiently-buried?
-        (and best-node block-node
-             (let [work-distance
-                   (subtract-chainwork (:chainwork best-node)
-                                       (:chainwork block-node))
-                   two-weeks-at-tip-work
-                   (multiply-chainwork
-                    (header/header-work (get-in best-node [:header :bits]))
-                    2016)]
-               (header/better-chain? work-distance
-                                     two-weeks-at-tip-work)))]
-    (not (and assume-valid-hash
-              in-assumed-chain?
-              in-best-chain?
-              (chainwork-at-least? (:chainwork best-node)
-                                   minimum-chainwork)
-              sufficiently-buried?))))
+  safety gates. All non-Script consensus checks remain mandatory.
 
-(defn- median-time-past-at-height [state height]
-  (let [node (ancestor-at-height state (:active-tip state) height)]
+  A storage-backed host may provide `:ancestor-node-at-height-fn` to avoid
+  rebuilding a connection for every ancestor in a normalized lazy map."
+  ([state block-hash]
+   (assumevalid-script-check? state block-hash {}))
+  ([state block-hash {:keys [ancestor-node-at-height-fn]}]
+   (let [{:keys [assume-valid-hash minimum-chainwork]} (:consensus state)
+         ancestor-node (or ancestor-node-at-height-fn ancestor-at-height)
+         block-node (get-in state [:nodes block-hash])
+         assumed-node (get-in state [:nodes assume-valid-hash])
+         best-node (get-in state [:nodes (:best-header state)])
+         in-assumed-chain?
+         (and assumed-node block-node
+              (= block-hash
+                 (:hash
+                  (ancestor-node state assume-valid-hash
+                                 (:height block-node)))))
+         in-best-chain?
+         (and best-node block-node
+              (= block-hash
+                 (:hash
+                  (ancestor-node state (:hash best-node)
+                                 (:height block-node)))))
+         sufficiently-buried?
+         (and best-node block-node
+              (let [work-distance
+                    (subtract-chainwork (:chainwork best-node)
+                                        (:chainwork block-node))
+                    two-weeks-at-tip-work
+                    (multiply-chainwork
+                     (header/header-work (get-in best-node [:header :bits]))
+                     2016)]
+                (header/better-chain? work-distance
+                                      two-weeks-at-tip-work)))]
+     (not (and assume-valid-hash
+               in-assumed-chain?
+               in-best-chain?
+               (chainwork-at-least? (:chainwork best-node)
+                                    minimum-chainwork)
+               sufficiently-buried?)))))
+
+(defn- median-time-past-at-height
+  [state height ancestor-node-at-height-fn]
+  (let [node ((or ancestor-node-at-height-fn ancestor-at-height)
+              state (:active-tip state) height)]
     (when-not node
       (codec/fail! :bitcoin.consensus/missing-locktime-ancestor
                    "BIP68 coin ancestor is unavailable."
@@ -465,7 +473,8 @@
                  (codec/fail! :bitcoin.consensus/missing-block-data
                               "Cannot activate a header without its block data."
                               {:hash hash :height height}))
-             scripts-checked? (assumevalid-script-check? current-state hash)
+             scripts-checked?
+             (assumevalid-script-check? current-state hash options)
              verifier
              (if scripts-checked?
                (verifier-for current-state height hash verify-script)
@@ -487,7 +496,8 @@
                :sigop-cost-fn
                (sigop-counter (:consensus current-state) height hash)
                :coin-mtp
-               #(median-time-past-at-height current-state %)})]
+               #(median-time-past-at-height
+                 current-state % (:ancestor-node-at-height-fn options))})]
          (-> current-state
              (assoc :utxo next-utxo :active-tip hash)
              (assoc-in [:nodes hash :undo] undo)

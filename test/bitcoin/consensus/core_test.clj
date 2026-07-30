@@ -811,7 +811,21 @@
          (chainstate/assumevalid-script-check?
           (assoc-in base [:consensus :minimum-chainwork]
                     (vec (repeat 32 0xff)))
-          genesis-hash)))))
+          genesis-hash)))
+    (let [calls (atom [])
+          resolver
+          (fn [state tip height]
+            (swap! calls conj [tip height])
+            (loop [hash tip]
+              (let [node (get-in state [:nodes hash])]
+                (if (= height (:height node))
+                  node
+                  (recur (:parent node))))))]
+      (is (false?
+           (chainstate/assumevalid-script-check?
+            base genesis-hash
+            {:ancestor-node-at-height-fn resolver})))
+      (is (= [[assumed-hash 0] [best-hash 0]] @calls)))))
 
 (deftest bip68-relative-height-and-time-locks-match-last-invalid-semantics
   (let [base {:version 2
