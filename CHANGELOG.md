@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1 — 2026-07-30
+
+- Stream full normalized-header cryptographic audits through a temporary
+  disk-backed metadata index instead of retaining the complete graph.
+- Validate parent linkage, height, and exact cumulative work with one SQL
+  self-join and cache header work by compact target, eliminating repeated
+  256-bit division across difficulty epochs.
+
 ## 0.10.0 — 2026-07-30
 
 - Add bounded normalized-header point lookup and row-count primitives so

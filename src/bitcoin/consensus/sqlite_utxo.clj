@@ -491,58 +491,140 @@
   "Recompute every normalized header hash, parent link, height, and chainwork.
 
   Normal startup deliberately trusts atomically committed normalized rows for
-  speed. This explicit audit is the slower cryptographic corruption check."
+  speed. This explicit audit is the slower cryptographic corruption check.
+  Verified compact metadata is staged in a connection-local temporary index,
+  then parent relationships are checked by one SQL join. The source database
+  is never modified and the JVM never retains a mainnet-sized graph."
   [backend]
-  (let [rows
-        (with-open [^Connection connection (connection backend)
-                    ^PreparedStatement statement
-                    (.prepareStatement
-                     connection
-                     "SELECT hash, node FROM consensus_header_nodes")
-                    ^ResultSet result (.executeQuery statement)]
-          (loop [values []]
-            (if (.next result)
-              (recur
-               (conj values
-                     [(.getString result 1)
-                      (decode-header-node (.getBytes result 2))]))
-              values)))
-        nodes (into {} (map (fn [[_ node]] [(:hash node) node])) rows)]
-    (doseq [[database-hash node] rows]
-      (let [decoded (header/decode-block-header
-                     (get-in node [:header :bytes]))
-            stored-hash (:hash node)
-            parent (:parent node)
-            parent-node (get nodes parent)
-            expected-height (if parent-node (inc (:height parent-node)) 0)
-            expected-chainwork
-            (if parent-node
-              (header/add-chainwork
-               (:chainwork parent-node)
-               (header/header-work (:bits decoded)))
-              (header/header-work (:bits decoded)))]
-        (when-not (and (= database-hash stored-hash)
-                       (= stored-hash (:hash-hex decoded))
-                       (= (get-in node [:header :hash]) (:hash decoded)))
-          (fail! :bitcoin.consensus/sqlite-header-hash
-                 "Stored normalized header hash does not match its raw bytes."
-                 {:stored stored-hash :actual (:hash-hex decoded)}))
-        (when-not (or parent-node
-                      (and (nil? parent)
-                           (every? zero? (:prev-block decoded))))
-          (fail! :bitcoin.consensus/sqlite-header-parent
-                 "Stored normalized header has a missing parent."
-                 {:hash stored-hash :parent parent}))
-        (when-not (= expected-height (:height node))
-          (fail! :bitcoin.consensus/sqlite-header-height
-                 "Stored normalized header height is inconsistent."
-                 {:hash stored-hash :expected expected-height
-                  :actual (:height node)}))
-        (when-not (= expected-chainwork (:chainwork node))
-          (fail! :bitcoin.consensus/sqlite-header-chainwork
-                 "Stored normalized header chainwork is inconsistent."
-                 {:hash stored-hash :height (:height node)}))))
-    {:header-integrity :ok :header-nodes (count nodes)}))
+  (with-open [^Connection connection (connection backend)]
+    (execute-statement! connection "PRAGMA temp_store = FILE")
+    (execute-statement!
+     connection
+     "CREATE TEMP TABLE consensus_header_audit (
+        hash TEXT PRIMARY KEY,
+        parent_hash TEXT,
+        height INTEGER NOT NULL,
+        chainwork BLOB NOT NULL CHECK(length(chainwork) = 32),
+        bits INTEGER NOT NULL
+      ) WITHOUT ROWID")
+    (let [auto-commit (.getAutoCommit connection)
+          work-cache (volatile! {})]
+      (try
+        (.setAutoCommit connection false)
+        (let [row-count
+              (with-open [^PreparedStatement scan
+                          (.prepareStatement
+                           connection
+                           "SELECT hash, node FROM consensus_header_nodes")
+                          ^PreparedStatement insert
+                          (.prepareStatement
+                           connection
+                           "INSERT INTO consensus_header_audit
+                              (hash, parent_hash, height, chainwork, bits)
+                            VALUES (?, ?, ?, ?, ?)")
+                          ^ResultSet result (.executeQuery scan)]
+                (loop [count 0 pending 0]
+                  (if-not (.next result)
+                    (do
+                      (when (pos? pending)
+                        (.executeBatch insert)
+                        (.clearBatch insert))
+                      count)
+                    (let [database-hash (.getString result 1)
+                          node (decode-header-node (.getBytes result 2))
+                          decoded
+                          (header/decode-block-header
+                           (get-in node [:header :bytes]))
+                          stored-hash (:hash node)]
+                      (when-not
+                       (and (= database-hash stored-hash)
+                            (= stored-hash (:hash-hex decoded))
+                            (= (get-in node [:header :hash])
+                               (:hash decoded)))
+                        (fail!
+                         :bitcoin.consensus/sqlite-header-hash
+                         "Stored normalized header hash does not match its raw bytes."
+                         {:stored stored-hash
+                          :actual (:hash-hex decoded)}))
+                      (.setString insert 1 stored-hash)
+                      (.setString insert 2 (:parent node))
+                      (.setLong insert 3 (:height node))
+                      (.setBytes
+                       insert 4
+                       (byte-array
+                        (map unchecked-byte (:chainwork node))))
+                      (.setLong insert 5 (:bits decoded))
+                      (.addBatch insert)
+                      (let [pending (inc pending)]
+                        (if (= 1000 pending)
+                          (do (.executeBatch insert)
+                              (.clearBatch insert)
+                              (recur (inc count) 0))
+                          (recur (inc count) pending)))))))
+              audited-count
+              (with-open [^PreparedStatement statement
+                          (.prepareStatement
+                           connection
+                           "SELECT child.hash, child.parent_hash,
+                                   child.height, child.chainwork, child.bits,
+                                   parent.height, parent.chainwork
+                              FROM consensus_header_audit AS child
+                              LEFT JOIN consensus_header_audit AS parent
+                                ON parent.hash = child.parent_hash")
+                          ^ResultSet result (.executeQuery statement)]
+                (loop [count 0]
+                  (if-not (.next result)
+                    count
+                    (let [hash (.getString result 1)
+                          parent (.getString result 2)
+                          height (.getLong result 3)
+                          chainwork (bytes-vector (.getBytes result 4))
+                          bits (.getLong result 5)
+                          parent-height (.getLong result 6)
+                          missing-parent? (.wasNull result)
+                          parent-chainwork
+                          (some-> (.getBytes result 7) bytes-vector)
+                          work
+                          (or (get @work-cache bits)
+                              (let [value (header/header-work bits)]
+                                (vswap! work-cache assoc bits value)
+                                value))
+                          expected-height
+                          (if parent (inc parent-height) 0)
+                          expected-chainwork
+                          (if parent
+                            (when-not missing-parent?
+                              (header/add-chainwork
+                               parent-chainwork work))
+                            work)]
+                      (when (and parent missing-parent?)
+                        (fail!
+                         :bitcoin.consensus/sqlite-header-parent
+                         "Stored normalized header has a missing parent."
+                         {:hash hash :parent parent}))
+                      (when-not (= expected-height height)
+                        (fail!
+                         :bitcoin.consensus/sqlite-header-height
+                         "Stored normalized header height is inconsistent."
+                         {:hash hash :expected expected-height
+                          :actual height}))
+                      (when-not (= expected-chainwork chainwork)
+                        (fail!
+                         :bitcoin.consensus/sqlite-header-chainwork
+                         "Stored normalized header chainwork is inconsistent."
+                         {:hash hash :height height}))
+                      (recur (inc count))))))]
+          (when-not (= row-count audited-count)
+            (fail! :bitcoin.consensus/sqlite-header-audit
+                   "Header audit row counts differ between passes."
+                   {:headers row-count :audited audited-count}))
+          (.commit connection)
+          {:header-integrity :ok :header-nodes row-count})
+        (catch Throwable error
+          (.rollback connection)
+          (throw error))
+        (finally
+          (.setAutoCommit connection auto-commit))))))
 
 (defn host-state
   "Return the atomically committed host-state bytes, if present."
