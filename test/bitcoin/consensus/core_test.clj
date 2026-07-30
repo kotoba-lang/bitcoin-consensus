@@ -145,6 +145,9 @@
                :locktime 0 :segwit? false}
         parsed (transaction/parse (transaction/serialize value))]
     (is (= -1 (:version parsed)))
+    (is (instance? Long (get-in parsed [:inputs 0 :sequence])))
+    (is (instance? Long (get-in parsed [:inputs 0 :vout])))
+    (is (instance? Long (:locktime parsed)))
     (is (= {:height -1 :time -1}
            (transaction/calculate-sequence-locks
             parsed [100] (constantly 0))))))

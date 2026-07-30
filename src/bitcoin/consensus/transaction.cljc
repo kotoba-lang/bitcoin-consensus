@@ -27,8 +27,8 @@
         [script-sig offset]
         (codec/read-var-bytes bytes offset max-script-bytes "scriptSig")
         [sequence offset] (codec/read-uint-le bytes offset 4)]
-    [{:txid-natural txid :vout vout :script-sig script-sig
-      :sequence sequence}
+    [{:txid-natural txid :vout (long vout) :script-sig script-sig
+      :sequence (long sequence)}
      offset]))
 
 (defn- read-output [bytes offset]
@@ -99,7 +99,7 @@
 
 (defn parse-at [bytes start]
   (let [[version offset] (codec/read-uint-le bytes start 4)
-        version (signed-int32 version)
+        version (signed-int32 (long version))
         [first-count after-first] (codec/read-compact-size bytes offset)
         segwit? (and (zero? first-count)
                      (< after-first (count bytes))
@@ -133,6 +133,7 @@
             (codec/fail! :bitcoin.consensus/superfluous-witness
                          "SegWit marker/flag has no witness data." {}))
         [locktime end] (codec/read-uint-le bytes offset 4)
+        locktime (long locktime)
         transaction {:version version :inputs inputs :outputs outputs
                      :witnesses witnesses :locktime locktime :segwit? segwit?}
         stripped (serialize transaction false)

@@ -22,11 +22,18 @@ mining_address="$(
   bitcoin-cli -regtest -datadir="$consensus_datadir" getnewaddress
 )"
 bitcoin-cli -regtest -datadir="$consensus_datadir" \
-  generatetoaddress 12 "$mining_address" >/dev/null
+  generatetoaddress 101 "$mining_address" >/dev/null
+destination_address="$(
+  bitcoin-cli -regtest -datadir="$consensus_datadir" getnewaddress
+)"
+bitcoin-cli -regtest -datadir="$consensus_datadir" \
+  sendtoaddress "$destination_address" 1 >/dev/null
+bitcoin-cli -regtest -datadir="$consensus_datadir" \
+  generatetoaddress 1 "$mining_address" >/dev/null
 
 result="$(
   {
-    for height in $(seq 0 12); do
+    for height in $(seq 0 102); do
       block_hash="$(
         bitcoin-cli -regtest -datadir="$consensus_datadir" getblockhash "$height"
       )"
@@ -76,7 +83,7 @@ result="$(
             (bitcoin.consensus.chainstate/active-height @chainstate))))'
 )"
 
-if [[ "$result" != "verified=13 active-height=12" ]]; then
+if [[ "$result" != "verified=103 active-height=102" ]]; then
   echo "Core/kernel differential did not verify every fixture: '$result'" >&2
   exit 1
 fi
