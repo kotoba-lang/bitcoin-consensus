@@ -235,27 +235,28 @@
 
 (declare next-taproot-state)
 
-(defn- index-valid-header [state parsed-header]
-  (let [hash (:hash-hex parsed-header)
-        parent (header/natural-hash->hex (:prev-block parsed-header))
-        parent-node (get-in state [:nodes parent])
-        height (inc (:height parent-node))
-        node
-        {:hash hash :parent (:hash parent-node)
-         :height height :header parsed-header :block nil
-         :deployments
-         {:taproot (next-taproot-state state parent-node height)}
-         :chainwork
-         (header/add-chainwork
-          (:chainwork parent-node)
-          (header/header-work (:bits parsed-header)))
-         :active? false :header-valid? true
-         :block-valid? false :scripts-checked? false}
-        added (assoc-in state [:nodes hash] node)
-        best-work (get-in state [:nodes (:best-header state) :chainwork])]
-    (if (header/better-chain? (:chainwork node) best-work)
-      (assoc added :best-header hash)
-      added)))
+(defn- index-valid-header
+  ([state parsed-header]
+   (index-valid-header state parsed-header
+                       (header/header-work (:bits parsed-header))))
+  ([state parsed-header work]
+   (let [hash (:hash-hex parsed-header)
+         parent (header/natural-hash->hex (:prev-block parsed-header))
+         parent-node (get-in state [:nodes parent])
+         height (inc (:height parent-node))
+         node
+         {:hash hash :parent (:hash parent-node)
+          :height height :header parsed-header :block nil
+          :deployments
+          {:taproot (next-taproot-state state parent-node height)}
+          :chainwork (header/add-chainwork (:chainwork parent-node) work)
+          :active? false :header-valid? true
+          :block-valid? false :scripts-checked? false}
+         added (assoc-in state [:nodes hash] node)
+         best-work (get-in state [:nodes (:best-header state) :chainwork])]
+     (if (header/better-chain? (:chainwork node) best-work)
+       (assoc added :best-header hash)
+       added))))
 
 (defn coinbase-height-prefix
   "Return the minimally encoded BIP34 script prefix for a block height."
@@ -552,7 +553,16 @@
               (codec/fail! :bitcoin.consensus/invalid-header
                            "Header batch failed contextual consensus."
                            {:errors (:errors result)}))
-            (reduce index-valid-header state parsed-headers)))))))
+            (first
+             (reduce
+              (fn [[current work-cache] parsed-header]
+                (let [bits (:bits parsed-header)
+                      work (or (get work-cache bits)
+                               (header/header-work bits))]
+                  [(index-valid-header current parsed-header work)
+                   (assoc work-cache bits work)]))
+              [state {}]
+              parsed-headers))))))))
 
 (defn accept-block
   "Validate and add a parsed block, activating it atomically only when its

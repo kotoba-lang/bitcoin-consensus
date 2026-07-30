@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 — 2026-07-30
+
+- Cache exact header work by compact target within each validated batch,
+  avoiding repeated 256-bit division across long difficulty epochs.
+- Upgrade to `org-bitcoin-p2p` v0.5.0 for JDK-accelerated JVM SHA-256d.
+
 ## 0.8.0 — 2026-07-30
 
 - Add atomic chronological `accept-headers` batch validation. It evaluates
