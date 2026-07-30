@@ -1083,7 +1083,29 @@
               loaded {:active-tip base-hash
                       :utxo {:height 2 :coins (dissoc coins
                                                      [(vec (repeat 32 2))
-                                                      3])}}))))))
+                                                      3])}}))))
+    (let [active-hash (apply str (repeat 64 "0"))
+          header-state
+          {:active-tip active-hash :best-header base-hash
+           :nodes
+           {active-hash
+            {:hash active-hash :parent nil :height 0
+             :chainwork (assoc header/zero-chainwork 31 1)
+             :active? true}
+            base-hash
+            {:hash base-hash :parent active-hash :height 2
+             :chainwork (assoc header/zero-chainwork 31 2)
+             :active? false}}}
+          activated (assumeutxo/activate header-state loaded)]
+      (is (= base-hash (:active-tip activated)))
+      (is (= coins (get-in activated [:utxo :coins])))
+      (is (true? (get-in activated [:nodes base-hash :active?])))
+      (is (true? (get-in activated [:nodes active-hash :active?])))
+      (is (= :bitcoin.consensus/snapshot-not-best-chain
+             (error-type
+              #(assumeutxo/activate
+                (assoc header-state :best-header active-hash)
+                loaded)))))))
 
 (deftest multi-peer-sync-is-bounded-matches-responses-and-requeues-timeouts
   (let [hashes (mapv #(format "%064x" %) (range 20))

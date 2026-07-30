@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1 — 2026-07-30
+
+- Activate an authenticated AssumeUTXO state only when its base is on the
+  best-work header chain and strictly exceeds the current active chainwork.
+- Preserve the original chainstate boundary for independent background
+  validation by keeping activation a pure, explicit transition.
+
 ## 0.5.0 — 2026-07-30
 
 - Add headers-first validation without activating headers that lack block data.

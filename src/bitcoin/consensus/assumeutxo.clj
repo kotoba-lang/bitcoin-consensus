@@ -406,3 +406,60 @@
                      "Background-validated UTXO set differs from the snapshot."
                      {:expected expected-hash :actual actual}))
       (assoc-in loaded [:snapshot :status] :validated))))
+
+(defn- ancestor-hash-at-height [state tip height]
+  (loop [hash tip]
+    (let [node (get-in state [:nodes hash])]
+      (cond
+        (nil? node) nil
+        (= height (:height node)) hash
+        (< (:height node) height) nil
+        :else (recur (:parent node))))))
+
+(defn activate
+  "Activate an authenticated snapshot on a headers-first chainstate.
+
+  The caller must retain the original chainstate for background validation.
+  Activation is refused unless the base is on the independently selected best
+  header chain and has strictly more work than the current active tip."
+  [header-state loaded]
+  (let [{:keys [base-height base-blockhash]} (:snapshot loaded)
+        base-node (get-in header-state [:nodes base-blockhash])
+        best-hash (:best-header header-state)
+        best-base (ancestor-hash-at-height
+                   header-state best-hash base-height)
+        active-node (get-in header-state
+                            [:nodes (:active-tip header-state)])]
+    (when-not (and base-node (= base-height (:height base-node)))
+      (codec/fail! :bitcoin.consensus/snapshot-base-header
+                   "Snapshot base header is not indexed at its expected height."
+                   {:height base-height :hash base-blockhash}))
+    (when-not (= base-blockhash best-base)
+      (codec/fail! :bitcoin.consensus/snapshot-not-best-chain
+                   "Snapshot base is not on the best-work header chain."
+                   {:height base-height :hash base-blockhash
+                    :best-header best-hash}))
+    (when-not (pos? (compare (:chainwork base-node)
+                             (:chainwork active-node)))
+      (codec/fail! :bitcoin.consensus/snapshot-work
+                   "Snapshot base does not exceed active chain work."
+                   {:base base-blockhash
+                    :active (:active-tip header-state)}))
+    (let [active-path
+          (loop [hash base-blockhash result #{}]
+            (if (nil? hash)
+              result
+              (recur (get-in header-state [:nodes hash :parent])
+                     (conj result hash))))]
+      (-> header-state
+          (assoc :active-tip base-blockhash
+                 :utxo (:utxo loaded)
+                 :snapshot (:snapshot loaded))
+          (update :nodes
+                  (fn [nodes]
+                    (into {}
+                          (map (fn [[hash node]]
+                                 [hash
+                                  (assoc node :active?
+                                         (contains? active-path hash))]))
+                          nodes)))))))
