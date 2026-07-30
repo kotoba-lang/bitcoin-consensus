@@ -748,6 +748,33 @@
       (is (true? (get-in second-connected
                          [:nodes second-hash :scripts-checked?]))))))
 
+(deftest header-batch-matches-sequential-validation-and-fails-atomically
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        first-block (mine-regtest-block genesis 1 52)
+        second-block (mine-regtest-block first-block 2 52)
+        initial (chainstate/initialize :regtest genesis (constantly true))
+        sequential
+        (-> initial
+            (chainstate/accept-header (:header first-block) 2000000000)
+            (chainstate/accept-header (:header second-block) 2000000000))
+        batch
+        (chainstate/accept-headers
+         initial [(:header first-block) (:header second-block)] 2000000000)
+        invalid-second
+        (header/decode-block-header
+         (header/encode-block-header
+          (update (:header second-block) :nonce inc)))]
+    (is (= sequential batch))
+    (is (= 2 (get-in batch [:nodes (:best-header batch) :height])))
+    (is (= :bitcoin.consensus/invalid-header
+           (error-type
+            #(chainstate/accept-headers
+              initial [(:header first-block) invalid-second] 2000000000))))
+    (is (= :bitcoin.consensus/known-header-batch
+           (error-type
+            #(chainstate/accept-headers
+              batch [(:header first-block)] 2000000000))))))
+
 (deftest assumevalid-skips-only-buried-best-header-chain-scripts
   (let [work (header/header-work 0x207fffff)
         genesis-hash "genesis"

@@ -233,6 +233,30 @@
                      {:errors (:errors result)}))
       parent-node)))
 
+(declare next-taproot-state)
+
+(defn- index-valid-header [state parsed-header]
+  (let [hash (:hash-hex parsed-header)
+        parent (header/natural-hash->hex (:prev-block parsed-header))
+        parent-node (get-in state [:nodes parent])
+        height (inc (:height parent-node))
+        node
+        {:hash hash :parent (:hash parent-node)
+         :height height :header parsed-header :block nil
+         :deployments
+         {:taproot (next-taproot-state state parent-node height)}
+         :chainwork
+         (header/add-chainwork
+          (:chainwork parent-node)
+          (header/header-work (:bits parsed-header)))
+         :active? false :header-valid? true
+         :block-valid? false :scripts-checked? false}
+        added (assoc-in state [:nodes hash] node)
+        best-work (get-in state [:nodes (:best-header state) :chainwork])]
+    (if (header/better-chain? (:chainwork node) best-work)
+      (assoc added :best-header hash)
+      added)))
+
 (defn coinbase-height-prefix
   "Return the minimally encoded BIP34 script prefix for a block height."
   [height]
@@ -480,25 +504,55 @@
   (let [hash (:hash-hex parsed-header)]
     (if (contains? (:nodes state) hash)
       state
-      (let [shell {:header parsed-header}
-            parent-node (validate-header! state shell now)
-            height (inc (:height parent-node))
-            node
-            {:hash hash :parent (:hash parent-node)
-             :height height :header parsed-header :block nil
-             :deployments
-             {:taproot (next-taproot-state state parent-node height)}
-             :chainwork
-             (header/add-chainwork
-              (:chainwork parent-node)
-              (header/header-work (:bits parsed-header)))
-             :active? false :header-valid? true
-             :block-valid? false :scripts-checked? false}
-            added (assoc-in state [:nodes hash] node)
-            best-work (get-in state [:nodes (:best-header state) :chainwork])]
-        (if (header/better-chain? (:chainwork node) best-work)
-          (assoc added :best-header hash)
-          added)))))
+      (do
+        (validate-header! state {:header parsed-header} now)
+        (index-valid-header state parsed-header)))))
+
+(defn accept-headers
+  "Atomically validate and index one chronological header batch.
+
+  Contextual PoW, difficulty, linkage, MTP, and future-time rules are checked
+  once over the shared 2,017-header context instead of rebuilding that window
+  for every header. Any duplicate, known header, broken link, or invalid
+  member rejects the complete immutable transition."
+  [state parsed-headers now]
+  (let [parsed-headers (vec parsed-headers)]
+    (if (empty? parsed-headers)
+      state
+      (let [hashes (mapv :hash-hex parsed-headers)
+            duplicate (first (for [[hash count] (frequencies hashes)
+                                   :when (> count 1)]
+                               hash))
+            known (first (filter #(contains? (:nodes state) %) hashes))]
+        (when duplicate
+          (codec/fail! :bitcoin.consensus/duplicate-header-batch
+                       "Header batch contains a duplicate."
+                       {:hash duplicate}))
+        (when known
+          (codec/fail! :bitcoin.consensus/known-header-batch
+                       "Header batch contains an already indexed header."
+                       {:hash known}))
+        (let [parent
+              (header/natural-hash->hex (:prev-block (first parsed-headers)))
+              parent-node (get-in state [:nodes parent])]
+          (when-not parent-node
+            (codec/fail! :bitcoin.consensus/unknown-parent
+                         "Header batch parent is unknown."
+                         {:parent parent}))
+          (let [context (ancestor-nodes state parent 2017)
+                headers (into (mapv :header context) parsed-headers)
+                result
+                (header/validate-header-consensus
+                 headers
+                 {:network (:network state)
+                  :start-height (:height (first context))
+                  :validate-from-index (count context)
+                  :now now})]
+            (when-not (:valid? result)
+              (codec/fail! :bitcoin.consensus/invalid-header
+                           "Header batch failed contextual consensus."
+                           {:errors (:errors result)}))
+            (reduce index-valid-header state parsed-headers)))))))
 
 (defn accept-block
   "Validate and add a parsed block, activating it atomically only when its

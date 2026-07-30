@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 — 2026-07-30
+
+- Add atomic chronological `accept-headers` batch validation. It evaluates
+  contextual PoW, expected difficulty, linkage, median time, and future time
+  once over a shared 2,017-header window, then indexes the batch without
+  rebuilding that window for every member.
+- Reject duplicate or already indexed members before applying a batch.
+
 ## 0.7.4 — 2026-07-30
 
 - Consume `org-bitcoin-p2p` v0.4.1 so real peers' full-range uint64 nonces
