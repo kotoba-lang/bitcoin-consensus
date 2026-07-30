@@ -455,12 +455,15 @@
   The caller must retain the original chainstate for background validation.
   Activation is refused unless the base is on the independently selected best
   header chain and has strictly more work than the current active tip."
-  [header-state loaded]
-  (let [{:keys [base-height base-blockhash]} (:snapshot loaded)
+  ([header-state loaded] (activate header-state loaded {}))
+  ([header-state loaded
+    {:keys [ancestor-hash-at-height-fn ancestry-hashes-fn]}]
+   (let [{:keys [base-height base-blockhash]} (:snapshot loaded)
         base-node (get-in header-state [:nodes base-blockhash])
         best-hash (:best-header header-state)
-        best-base (ancestor-hash-at-height
-                   header-state best-hash base-height)
+        best-base
+        ((or ancestor-hash-at-height-fn ancestor-hash-at-height)
+         header-state best-hash base-height)
         active-node (get-in header-state
                             [:nodes (:active-tip header-state)])]
     (when-not (and base-node (= base-height (:height base-node)))
@@ -479,11 +482,20 @@
                    {:base base-blockhash
                     :active (:active-tip header-state)}))
     (let [active-path
-          (loop [hash base-blockhash result #{}]
-            (if (nil? hash)
-              result
-              (recur (get-in header-state [:nodes hash :parent])
-                     (conj result hash))))]
+          (if ancestry-hashes-fn
+            (ancestry-hashes-fn header-state base-blockhash)
+            (loop [hash base-blockhash result #{}]
+              (if (nil? hash)
+                result
+                (recur (get-in header-state [:nodes hash :parent])
+                       (conj result hash)))))]
+      (when-not (and (set? active-path)
+                     (contains? active-path base-blockhash)
+                     (contains? active-path (:active-tip header-state)))
+        (codec/fail! :bitcoin.consensus/snapshot-ancestry
+                     "Snapshot active ancestry proof is incomplete."
+                     {:base base-blockhash
+                      :genesis (:active-tip header-state)}))
       (-> header-state
           (assoc :active-tip base-blockhash
                  :utxo (:utxo loaded)
@@ -495,4 +507,4 @@
                                  [hash
                                   (assoc node :active?
                                          (contains? active-path hash))]))
-                          nodes)))))))
+                          nodes))))))))

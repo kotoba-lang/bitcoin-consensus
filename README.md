@@ -32,6 +32,8 @@ This repository is separate from the permanently read-only
 - monotonic active-chain undo retention with a snapshot-aware prune floor,
   bounded immediate reorganization depth, typed deep-reorg recovery, and
   retained-journal linkage audits
+- single-connection normalized ancestry cursors for mainnet-scale snapshot and
+  recovery proofs without connection-per-header amplification
 - provably unspendable output pruning and signed transaction-version handling
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data

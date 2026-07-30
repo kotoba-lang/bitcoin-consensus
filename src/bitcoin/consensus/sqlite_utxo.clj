@@ -597,6 +597,69 @@
      [hash]
      #(decode-header-node (.getBytes ^ResultSet % 1)))))
 
+(defn- prepared-header-node
+  [^PreparedStatement statement hash]
+  (.setString statement 1 hash)
+  (with-open [result (.executeQuery statement)]
+    (when (.next result)
+      (let [node (decode-header-node (.getBytes result 1))]
+        (when-not (= hash (:hash node))
+          (fail! :bitcoin.consensus/sqlite-header-hash
+                 "Normalized header key differs from its raw hash."
+                 {:key hash :actual (:hash node)}))
+        node))))
+
+(defn header-ancestor-hash-at-height
+  "Resolve one ancestor using a single SQLite connection and prepared query."
+  [backend tip-hash target-height]
+  (when-not (and (string? tip-hash) (nat-int? target-height))
+    (fail! :bitcoin.consensus/sqlite-header-ancestry
+           "Header ancestry lookup requires a tip hash and target height."
+           {:tip tip-hash :height target-height}))
+  (with-open [connection (connection backend)
+              statement
+              (.prepareStatement
+               connection
+               "SELECT node FROM consensus_header_nodes WHERE hash = ?")]
+    (loop [hash tip-hash]
+      (when hash
+        (let [node (prepared-header-node statement hash)]
+          (when-not node
+            (fail! :bitcoin.consensus/sqlite-header-parent
+                   "Normalized header ancestry is incomplete."
+                   {:hash hash :target-height target-height}))
+          (cond
+            (= target-height (:height node)) hash
+            (< (:height node) target-height) nil
+            :else (recur (:parent node))))))))
+
+(defn header-ancestry-hashes
+  "Return tip-through-genesis hashes with one reusable SQLite read cursor."
+  [backend tip-hash]
+  (when-not (string? tip-hash)
+    (fail! :bitcoin.consensus/sqlite-header-ancestry
+           "Header ancestry requires a display-order tip hash."
+           {:tip tip-hash}))
+  (with-open [connection (connection backend)
+              statement
+              (.prepareStatement
+               connection
+               "SELECT node FROM consensus_header_nodes WHERE hash = ?")]
+    (loop [hash tip-hash result #{}]
+      (if (nil? hash)
+        result
+        (do
+          (when (contains? result hash)
+            (fail! :bitcoin.consensus/sqlite-header-cycle
+                   "Normalized header ancestry contains a cycle."
+                   {:hash hash}))
+          (let [node (prepared-header-node statement hash)]
+            (when-not node
+              (fail! :bitcoin.consensus/sqlite-header-parent
+                     "Normalized header ancestry is incomplete."
+                     {:hash hash}))
+            (recur (:parent node) (conj result hash))))))))
+
 (defn header-node-count
   "Return the normalized header row count without decoding header values."
   [backend]

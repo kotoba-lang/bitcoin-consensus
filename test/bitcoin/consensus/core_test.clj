@@ -1257,6 +1257,27 @@
       (is (= coins (get-in activated [:utxo :coins])))
       (is (true? (get-in activated [:nodes base-hash :active?])))
       (is (true? (get-in activated [:nodes active-hash :active?])))
+      (is (= (:active-tip activated)
+             (:active-tip
+              (assumeutxo/activate
+               header-state loaded
+               {:ancestor-hash-at-height-fn
+                (fn [_state tip height]
+                  (is (= base-hash tip))
+                  (is (= 2 height))
+                  base-hash)
+                :ancestry-hashes-fn
+                (fn [_state tip]
+                  (is (= base-hash tip))
+                  #{base-hash active-hash})}))))
+      (is (= :bitcoin.consensus/snapshot-ancestry
+             (error-type
+              #(assumeutxo/activate
+                header-state loaded
+                {:ancestor-hash-at-height-fn
+                 (fn [& _] base-hash)
+                 :ancestry-hashes-fn
+                 (fn [& _] #{base-hash})}))))
       (is (= :bitcoin.consensus/snapshot-not-best-chain
              (error-type
               #(assumeutxo/activate

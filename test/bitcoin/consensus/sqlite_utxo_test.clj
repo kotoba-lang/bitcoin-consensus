@@ -322,7 +322,55 @@
                 (ex-data
                  (try
                    (sqlite/header-integrity-check! backend)
-                   (catch clojure.lang.ExceptionInfo error error))))))))))
+                 (catch clojure.lang.ExceptionInfo error error))))))))))
+
+(deftest normalized-header-ancestry-reuses-one-bounded-read-cursor
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            genesis-header
+            (header/decode-block-header
+             (header/hex->bytes header/regtest-genesis-header-hex))
+            make-child
+            (fn [parent nonce]
+              (header/decode-block-header
+               (header/encode-block-header
+                (assoc parent
+                       :prev-block (:hash parent)
+                       :timestamp (inc (:timestamp parent))
+                       :nonce nonce))))
+            headers
+            (vec (take 3 (iterate #(make-child % (inc (:nonce %)))
+                                  genesis-header)))
+            nodes
+            (mapv
+             (fn [height value]
+               {:hash (:hash-hex value)
+                :parent
+                (when (pos? height)
+                  (:hash-hex (nth headers (dec height))))
+                :height height :header value :block nil
+                :chainwork
+                (vec
+                 (concat
+                  (header/uint-le->bytes (inc height) 4)
+                  (repeat 28 0)))
+                :undo nil :deployments {:taproot :active}
+                :active? (zero? height)
+                :header-valid? true :block-valid? (zero? height)
+                :scripts-checked? (zero? height)})
+             (range) headers)
+            tip (:hash (peek nodes))]
+        (sqlite/save-host-and-headers!
+         backend nil -1 (.getBytes "ancestry") nodes)
+        (is (= (:hash (first nodes))
+               (sqlite/header-ancestor-hash-at-height backend tip 0)))
+        (is (= (:hash (second nodes))
+               (sqlite/header-ancestor-hash-at-height backend tip 1)))
+        (is (nil?
+             (sqlite/header-ancestor-hash-at-height backend tip 3)))
+        (is (= (set (map :hash nodes))
+               (sqlite/header-ancestry-hashes backend tip)))))))
 
 (deftest pending-side-block-staging-is-atomic-and-bounded
   (with-database

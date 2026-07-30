@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.0 — 2026-07-31
+
+- Add normalized-header ancestry cursors that reuse one SQLite connection and
+  prepared statement while retaining raw-hash, parent, height, and cycle
+  validation.
+- Allow authenticated snapshot activation to receive storage-backed ancestry
+  resolvers while preserving best-chain membership and complete active-path
+  checks.
+- Reduce a real 544,081-header mainnet ancestor lookup from about 23 minutes
+  to 51.8 seconds at roughly 293 MiB RSS; a 416,180-hash active path completes
+  in 32.9 seconds at roughly 417 MiB RSS.
+
 ## 0.13.0 — 2026-07-31
 
 - Add schema-v6 monotonic active-chain undo pruning with a persisted,
