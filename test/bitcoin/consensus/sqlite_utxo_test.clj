@@ -369,6 +369,12 @@
                (sqlite/header-ancestor-hash-at-height backend tip 1)))
         (is (nil?
              (sqlite/header-ancestor-hash-at-height backend tip 3)))
+        (is (= (into {} (map (juxt :height identity)) (take 2 nodes))
+               (sqlite/header-ancestor-nodes-between
+                backend tip 0 1)))
+        (is (= {}
+               (sqlite/header-ancestor-nodes-between
+                backend tip 3 4)))
         (is (= (set (map :hash nodes))
                (sqlite/header-ancestry-hashes backend tip)))))))
 

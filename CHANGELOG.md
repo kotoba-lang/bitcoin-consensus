@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.0 — 2026-07-31
+
+- Add a bounded normalized-ancestry window cursor so sequential block
+  validation can cache nearby ancestor nodes after one distant traversal.
+- Fail closed when a queried normalized parent does not strictly decrease in
+  height, preventing corrupt cyclic ancestry from looping indefinitely.
+
 ## 0.16.0 — 2026-07-31
 
 - Allow storage-backed block hosts to resolve distant ancestor nodes for

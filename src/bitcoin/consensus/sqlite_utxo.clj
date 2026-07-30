@@ -617,29 +617,56 @@
                  {:key hash :actual (:hash node)}))
         node))))
 
-(defn header-ancestor-hash-at-height
-  "Resolve one ancestor using a single SQLite connection and prepared query."
-  [backend tip-hash target-height]
-  (when-not (and (string? tip-hash) (nat-int? target-height))
+(defn header-ancestor-nodes-between
+  "Resolve an inclusive bounded height window on one tip ancestry.
+
+  Traversal uses one SQLite connection and prepared query. The returned map is
+  keyed by height and never contains more than `maximum - minimum + 1` nodes."
+  [backend tip-hash minimum-height maximum-height]
+  (when-not (and (string? tip-hash)
+                 (nat-int? minimum-height)
+                 (nat-int? maximum-height)
+                 (<= minimum-height maximum-height))
     (fail! :bitcoin.consensus/sqlite-header-ancestry
-           "Header ancestry lookup requires a tip hash and target height."
-           {:tip tip-hash :height target-height}))
+           "Header ancestry window requires a tip and ordered natural heights."
+           {:tip tip-hash
+            :minimum-height minimum-height
+            :maximum-height maximum-height}))
   (with-open [connection (connection backend)
               statement
               (.prepareStatement
                connection
                "SELECT node FROM consensus_header_nodes WHERE hash = ?")]
-    (loop [hash tip-hash]
-      (when hash
+    (loop [hash tip-hash previous-height nil result {}]
+      (if (nil? hash)
+        result
         (let [node (prepared-header-node statement hash)]
           (when-not node
             (fail! :bitcoin.consensus/sqlite-header-parent
                    "Normalized header ancestry is incomplete."
-                   {:hash hash :target-height target-height}))
+                   {:hash hash :target-height minimum-height}))
+          (when (and previous-height
+                     (not (< (:height node) previous-height)))
+            (fail! :bitcoin.consensus/sqlite-header-height
+                   "Normalized header ancestry does not decrease in height."
+                   {:hash hash :height (:height node)
+                    :child-height previous-height}))
+          (let [result
+                (if (<= minimum-height (:height node) maximum-height)
+                  (assoc result (:height node) node)
+                  result)]
           (cond
-            (= target-height (:height node)) hash
-            (< (:height node) target-height) nil
-            :else (recur (:parent node))))))))
+            (<= (:height node) minimum-height) result
+            :else
+            (recur (:parent node) (:height node) result))))))))
+
+(defn header-ancestor-hash-at-height
+  "Resolve one ancestor using a single SQLite connection and prepared query."
+  [backend tip-hash target-height]
+  (some-> (get (header-ancestor-nodes-between
+                backend tip-hash target-height target-height)
+               target-height)
+          :hash))
 
 (defn header-ancestry-hashes
   "Return tip-through-genesis hashes with one reusable SQLite read cursor."
