@@ -3,7 +3,8 @@
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sqlite-utxo :as sqlite]
             [bitcoin.consensus.utxo :as utxo]
-            [clojure.test :refer [deftest is testing]])
+            [clojure.test :refer [deftest is testing]]
+            [kotobase.bitcoin.protocol :as header])
   (:import [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))
 
@@ -106,7 +107,8 @@
                           :created #{[txid-b 7]}}})))
           (is (nil? (sqlite/lookup reopened [txid-a 0])))
           (is (= coin-b (sqlite/lookup reopened [txid-b 7])))
-          (is (= {:integrity :ok :coin-count 1}
+          (is (= {:integrity :ok :coin-count 1
+                  :header-integrity :ok :header-nodes 0}
                  (sqlite/integrity-check! reopened)))
           (is (= {:height 0 :tip "block-0" :coin-count 1}
                  (sqlite/disconnect-tip! reopened "block-1")))
@@ -130,6 +132,73 @@
                    (try
                      (sqlite/open {:path path :network :testnet})
                      (catch clojure.lang.ExceptionInfo error error)))))))))))
+
+(deftest normalized-headers-upsert-and-reopen
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            decoded
+            (header/decode-block-header
+             (header/hex->bytes header/regtest-genesis-header-hex))
+            node
+            {:hash (:hash-hex decoded) :parent nil :height 0
+             :header decoded :block nil
+             :chainwork (header/header-work (:bits decoded))
+             :undo nil :deployments {:taproot :active}
+             :active? true :header-valid? true
+             :block-valid? true :scripts-checked? true}
+            bytes (.getBytes "compact-host-state")]
+        (sqlite/save-host-and-headers! backend nil -1 bytes [node])
+        (is (= {(:hash node) node} (sqlite/header-nodes backend)))
+        (is (= (seq bytes) (seq (sqlite/host-state backend))))
+        (let [updated (assoc node :active? false :block-valid? false)]
+          (sqlite/save-host-and-headers! backend nil -1 bytes [updated])
+          (is (= false
+                 (get-in (sqlite/header-nodes backend)
+                         [(:hash node) :active?])))
+          (is (= false
+                 (get-in (sqlite/header-nodes backend)
+                         [(:hash node) :block-valid?]))))))))
+
+(deftest normalized-header-integrity-recomputes-raw-hashes
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            decoded
+            (header/decode-block-header
+             (header/hex->bytes header/regtest-genesis-header-hex))
+            node
+            {:hash (:hash-hex decoded) :parent nil :height 0
+             :header decoded :block nil
+             :chainwork (header/header-work (:bits decoded))
+             :undo nil :deployments {:taproot :active}
+             :active? true :header-valid? true
+             :block-valid? true :scripts-checked? true}]
+        (sqlite/save-host-and-headers!
+         backend nil -1 (.getBytes "host") [node])
+        (is (= {:header-integrity :ok :header-nodes 1}
+               (sqlite/header-integrity-check! backend)))
+        (with-open [connection (.getConnection (sqlite/datasource path))
+                    select (.prepareStatement
+                            connection
+                            "SELECT node FROM consensus_header_nodes")
+                    result (.executeQuery select)]
+          (is (.next result))
+          (let [damaged (aclone (.getBytes result 1))]
+            (aset-byte damaged 5
+                       (unchecked-byte
+                        (bit-xor 1 (bit-and 0xff (aget damaged 5)))))
+            (with-open [update (.prepareStatement
+                               connection
+                               "UPDATE consensus_header_nodes SET node = ?")]
+              (.setBytes update 1 damaged)
+              (is (= 1 (.executeUpdate update))))))
+        (is (= :bitcoin.consensus/sqlite-header-hash
+               (:type
+                (ex-data
+                 (try
+                   (sqlite/header-integrity-check! backend)
+                   (catch clojure.lang.ExceptionInfo error error))))))))))
 
 (deftest stale-parent-cannot-commit
   (with-database

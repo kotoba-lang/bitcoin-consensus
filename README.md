@@ -26,7 +26,8 @@ This repository is separate from the permanently read-only
 - network-bound SQLite UTXO storage with WAL/FULL durability, ordered outpoints,
   atomic block delta + undo commits, stale-tip rejection, restart-safe
   disconnect, multi-block reorganization + host-state commits, integrity
-  checks, schema migration, and O(touched outpoints) transition memory
+  checks, schema migration, normalized fixed-length header nodes, compact host
+  metadata, and O(touched outpoints) transition memory
 - provably unspendable output pruning and signed transaction-version handling
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data
@@ -37,7 +38,8 @@ This repository is separate from the permanently read-only
   constant-memory authenticated import into SQLite
 - separate assumed and background-validated snapshot states
 - checksummed atomic chainstate v2 persistence, v1 migration, and restart
-  invariant validation
+  invariant validation, plus explicit raw-header/hash/link/height/chainwork
+  integrity audit
 - bounded multi-peer block scheduling, response matching, timeout requeue, and
   misbehavior scoring
 - official BIP143/BIP340/BIP341 vectors, mainnet genesis/block 1 fixtures,

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0 — 2026-07-30
+
+- Add schema-v4 normalized, fixed-length header-node storage and atomically
+  commit changed header rows with compact host metadata, UTXO transitions,
+  snapshot activation, and reorganization state.
+- Add legacy monolithic-host migration support for node hosts and expose a
+  full cryptographic header audit that recomputes raw hashes, parent links,
+  heights, and exact cumulative work.
+- Accelerate mainnet-scale restart decoding with byte-array loops, direct hash
+  conversion, transient map construction, and allocation-free parent lookup.
+
 ## 0.8.1 — 2026-07-30
 
 - Cache exact header work by compact target within each validated batch,

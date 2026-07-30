@@ -7,12 +7,13 @@
   (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.utxo :as utxo]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [kotobase.bitcoin.protocol :as header])
   (:import [java.sql Connection PreparedStatement ResultSet]
            [javax.sql DataSource]
            [org.sqlite SQLiteDataSource]))
 
-(def schema-version 2)
+(def schema-version 4)
 (def ^:private deleted ::deleted)
 
 (def ^:private schema
@@ -54,7 +55,11 @@
       id INTEGER PRIMARY KEY CHECK(id = 1),
       bytes BLOB NOT NULL,
       updated_at INTEGER NOT NULL DEFAULT(unixepoch())
-    )"])
+    )"
+   "CREATE TABLE IF NOT EXISTS consensus_header_nodes (
+      hash TEXT PRIMARY KEY,
+      node BLOB NOT NULL CHECK(length(node) = 151)
+    ) WITHOUT ROWID"])
 
 (defn- fail! [type message data]
   (codec/fail! type message data))
@@ -103,7 +108,13 @@
   (byte-array (map unchecked-byte txid)))
 
 (defn- bytes-vector [^bytes value]
-  (mapv #(bit-and 0xff %) value))
+  (loop [index 0
+         result (transient [])]
+    (if (= index (alength value))
+      (persistent! result)
+      (recur (unchecked-inc index)
+             (conj! result
+                    (bit-and 0xff (aget value index)))))))
 
 (defn- read-coin [^ResultSet result offset]
   {:value (.getLong result offset)
@@ -190,7 +201,7 @@
       (let [stored-version (meta-value connection "schema_version")
             stored-network (meta-value connection "network")]
         (when (and stored-version
-                   (not (contains? #{1 schema-version}
+                   (not (contains? #{1 2 3 schema-version}
                                    (parse-long stored-version))))
           (fail! :bitcoin.consensus/sqlite-schema
                  "Unsupported SQLite UTXO schema."
@@ -326,6 +337,186 @@
       bytes=excluded.bytes, updated_at=unixepoch()"
    [bytes]))
 
+(def ^:private taproot-state->code
+  {nil 0 :defined 1 :started 2 :locked-in 3 :active 4 :failed 5})
+(def ^:private code->taproot-state
+  (into {} (map (fn [[state code]] [code state])) taproot-state->code))
+
+(defn- node-flags [node]
+  (cond-> 0
+    (:active? node) (bit-or 1)
+    (:header-valid? node) (bit-or 2)
+    (:block-valid? node) (bit-or 4)
+    (:scripts-checked? node) (bit-or 8)))
+
+(defn- encode-header-node [node]
+  (let [header-value (:header node)
+        raw (:bytes header-value)
+        chainwork (:chainwork node)
+        taproot (get-in node [:deployments :taproot])
+        taproot-code (get taproot-state->code taproot)]
+    (when-not (and (string? (:hash node))
+                   (= (:hash node) (:hash-hex header-value))
+                   (= 80 (count raw))
+                   (= 32 (count chainwork))
+                   (nat-int? (:height node))
+                   (<= (:height node) 0xffffffff)
+                   (some? taproot-code))
+      (fail! :bitcoin.consensus/sqlite-header
+             "Normalized header node is malformed."
+             {:hash (:hash node) :height (:height node)}))
+    (byte-array
+     (map
+      unchecked-byte
+      (concat
+       [1]
+       (header/uint-le->bytes (:height node) 4)
+       (:hash header-value)
+       raw chainwork
+       [taproot-code (node-flags node)])))))
+
+(defn- write-header-nodes! [^Connection connection nodes]
+  (doseq [batch (partition-all 500 nodes)]
+    (let [placeholders
+          (str/join "," (repeat (count batch) "(?, ?)"))
+          sql
+          (str
+           "INSERT INTO consensus_header_nodes(hash, node) VALUES "
+           placeholders
+           " ON CONFLICT(hash) DO UPDATE SET node=excluded.node")
+          params
+          (vec
+           (mapcat
+            (fn [node] [(:hash node) (encode-header-node node)])
+            batch))]
+      (execute! connection sql params))))
+
+(defn- decode-stored-header [hash natural-hash raw]
+  {:version (header/bytes->int32-le (subvec raw 0 4))
+   :prev-block (subvec raw 4 36)
+   :merkle-root (subvec raw 36 68)
+   :timestamp (header/bytes->uint-le (subvec raw 68 72))
+   :bits (header/bytes->uint-le (subvec raw 72 76))
+   :nonce (header/bytes->uint-le (subvec raw 76 80))
+   :hash natural-hash
+   :hash-hex hash
+   :bytes raw})
+
+(defn- decode-header-node [bytes]
+  (let [value (bytes-vector bytes)]
+    (when-not (and (= 151 (count value)) (= 1 (first value)))
+      (fail! :bitcoin.consensus/sqlite-header-format
+             "Stored header node has an unsupported format."
+             {:length (count value) :version (first value)}))
+    (let [height (header/bytes->uint-le (subvec value 1 5))
+          natural-hash (subvec value 5 37)
+          hash (header/natural-hash->hex natural-hash)
+          raw (subvec value 37 117)
+          chainwork (subvec value 117 149)
+          taproot-code (nth value 149)
+          flags (nth value 150)
+          taproot (get code->taproot-state taproot-code ::unknown)
+          decoded (decode-stored-header hash natural-hash raw)
+          parent-natural (:prev-block decoded)
+          parent (when-not (every? zero? parent-natural)
+                   (header/natural-hash->hex parent-natural))]
+      (when (= ::unknown taproot)
+        (fail! :bitcoin.consensus/sqlite-header-format
+               "Stored header node has an unknown deployment state."
+               {:taproot-code taproot-code :hash hash}))
+      (when-not (zero? (bit-and flags 0xf0))
+        (fail! :bitcoin.consensus/sqlite-header-format
+               "Stored header node has unknown validity flags."
+               {:flags flags :hash hash}))
+      {:hash hash
+       :parent parent
+       :height height
+       :header decoded
+       :block nil
+       :chainwork chainwork
+       :undo nil
+       :deployments {:taproot taproot}
+       :active? (bit-test flags 0)
+       :header-valid? (bit-test flags 1)
+       :block-valid? (bit-test flags 2)
+       :scripts-checked? (bit-test flags 3)})))
+
+(defn- blob-header-nodes
+  [backend]
+  (with-open [^Connection connection (connection backend)
+              ^PreparedStatement statement
+              (.prepareStatement
+               connection
+               "SELECT node FROM consensus_header_nodes")
+              ^ResultSet result (.executeQuery statement)]
+    (loop [nodes (transient {})]
+      (if (.next result)
+        (let [node (decode-header-node (.getBytes result 1))]
+          (recur (assoc! nodes (:hash node) node)))
+        (persistent! nodes)))))
+
+(defn header-nodes
+  "Load normalized header/fork-choice nodes keyed by display-order hash."
+  [backend]
+  (blob-header-nodes backend))
+
+(defn header-integrity-check!
+  "Recompute every normalized header hash, parent link, height, and chainwork.
+
+  Normal startup deliberately trusts atomically committed normalized rows for
+  speed. This explicit audit is the slower cryptographic corruption check."
+  [backend]
+  (let [rows
+        (with-open [^Connection connection (connection backend)
+                    ^PreparedStatement statement
+                    (.prepareStatement
+                     connection
+                     "SELECT hash, node FROM consensus_header_nodes")
+                    ^ResultSet result (.executeQuery statement)]
+          (loop [values []]
+            (if (.next result)
+              (recur
+               (conj values
+                     [(.getString result 1)
+                      (decode-header-node (.getBytes result 2))]))
+              values)))
+        nodes (into {} (map (fn [[_ node]] [(:hash node) node])) rows)]
+    (doseq [[database-hash node] rows]
+      (let [decoded (header/decode-block-header
+                     (get-in node [:header :bytes]))
+            stored-hash (:hash node)
+            parent (:parent node)
+            parent-node (get nodes parent)
+            expected-height (if parent-node (inc (:height parent-node)) 0)
+            expected-chainwork
+            (if parent-node
+              (header/add-chainwork
+               (:chainwork parent-node)
+               (header/header-work (:bits decoded)))
+              (header/header-work (:bits decoded)))]
+        (when-not (and (= database-hash stored-hash)
+                       (= stored-hash (:hash-hex decoded))
+                       (= (get-in node [:header :hash]) (:hash decoded)))
+          (fail! :bitcoin.consensus/sqlite-header-hash
+                 "Stored normalized header hash does not match its raw bytes."
+                 {:stored stored-hash :actual (:hash-hex decoded)}))
+        (when-not (or parent-node
+                      (and (nil? parent)
+                           (every? zero? (:prev-block decoded))))
+          (fail! :bitcoin.consensus/sqlite-header-parent
+                 "Stored normalized header has a missing parent."
+                 {:hash stored-hash :parent parent}))
+        (when-not (= expected-height (:height node))
+          (fail! :bitcoin.consensus/sqlite-header-height
+                 "Stored normalized header height is inconsistent."
+                 {:hash stored-hash :expected expected-height
+                  :actual (:height node)}))
+        (when-not (= expected-chainwork (:chainwork node))
+          (fail! :bitcoin.consensus/sqlite-header-chainwork
+                 "Stored normalized header chainwork is inconsistent."
+                 {:hash stored-hash :height (:height node)}))))
+    {:header-integrity :ok :header-nodes (count nodes)}))
+
 (defn host-state
   "Return the atomically committed host-state bytes, if present."
   [backend]
@@ -386,9 +577,17 @@
       (delete-coin! connection key)
       (insert-coin! connection key value))))
 
+(declare save-host-and-headers!)
+
 (defn save-host-state!
   "Atomically update host metadata without changing the UTXO tip."
   [backend expected-tip expected-height bytes]
+  (save-host-and-headers!
+   backend expected-tip expected-height bytes []))
+
+(defn save-host-and-headers!
+  "Atomically update compact host metadata and changed normalized headers."
+  [backend expected-tip expected-height bytes nodes]
   (with-open [connection (connection backend)]
     (let [auto-commit (.getAutoCommit connection)]
       (try
@@ -402,6 +601,7 @@
                    {:expected-tip expected-tip :actual-tip actual-tip
                     :expected-height expected-height
                     :actual-height actual-height}))
+          (write-header-nodes! connection nodes)
           (write-host-state! connection bytes)
           (.commit connection)
           true)
@@ -433,11 +633,13 @@
                     "AssumeUTXO import requires an empty UTXO database."
                     {:coin-count current-count}))
            (let [host-state-fn (:host-state-fn options)
+                 header-nodes (:header-nodes options)
+                 header-nodes-fn (:header-nodes-fn options)
                  loaded
                  (assumeutxo/load-snapshot
                   source (:network backend) header-at-height
                   (-> options
-                      (dissoc :host-state-fn)
+                      (dissoc :host-state-fn :header-nodes :header-nodes-fn)
                       (assoc :materialize? false
                              :coin-consumer
                              #(insert-coin! connection %1 %2))))
@@ -448,6 +650,11 @@
              (put-meta! connection "coin_count" coins-count)
              (when host-state-fn
                (write-host-state! connection (host-state-fn loaded)))
+             (write-header-nodes!
+              connection
+              (if header-nodes-fn
+                (header-nodes-fn loaded)
+                header-nodes))
              (.commit connection)
              (:snapshot loaded)))
          (catch Throwable error
@@ -505,7 +712,7 @@
   the freshly validated undo delta."
   [^CoinOverlay view
    {:keys [expected-tip expected-height new-tip new-height
-           detach attach host-state-bytes]}]
+           detach attach host-state-bytes header-nodes]}]
   (let [^Connection connection (:connection view)]
     (when @(:closed? view)
       (fail! :bitcoin.consensus/closed-utxo-view
@@ -573,6 +780,7 @@
           (put-meta! connection "height" new-height)
           (put-meta! connection "tip" new-tip)
           (put-meta! connection "coin_count" next-count)
+          (write-header-nodes! connection header-nodes)
           (when host-state-bytes
             (write-host-state! connection host-state-bytes))
           (.commit connection)
@@ -656,7 +864,7 @@
           (.setAutoCommit connection auto-commit))))))
 
 (defn integrity-check!
-  "Run SQLite's full page/B-tree integrity check and metadata count check."
+  "Audit SQLite pages, UTXO metadata, and normalized header cryptography."
   [backend]
   (with-open [connection (connection backend)]
     (let [integrity
@@ -673,7 +881,8 @@
         (fail! :bitcoin.consensus/sqlite-count-mismatch
                "SQLite UTXO metadata count is inconsistent."
                {:expected claimed :actual actual}))
-      {:integrity :ok :coin-count actual})))
+      (merge {:integrity :ok :coin-count actual}
+             (header-integrity-check! backend)))))
 
 (defn entries
   "Return a reducible ordered stream of committed UTXO entries. The stream is

@@ -27,10 +27,10 @@
     (some? (:snapshot state))
     (assoc :snapshot (:snapshot state))))
 
-(defn encode
-  "Encode chainstate as checksum-newline-EDN bytes."
-  [state]
-  (let [body (.getBytes (pr-str (state-payload state))
+(defn encode-value
+  "Encode one EDN value as checksum-newline-EDN bytes."
+  [value]
+  (let [body (.getBytes (pr-str value)
                         StandardCharsets/UTF_8)
         checksum (.getBytes (str (sha256-hex body) "\n")
                             StandardCharsets/US_ASCII)
@@ -39,11 +39,16 @@
     (System/arraycopy body 0 result (alength checksum) (alength body))
     result))
 
-(defn- active-path [state]
-  (loop [hash (:active-tip state) result #{}]
+(defn encode
+  "Encode chainstate as checksum-newline-EDN bytes."
+  [state]
+  (encode-value (state-payload state)))
+
+(defn- active-path [nodes active-tip]
+  (loop [hash active-tip result #{}]
     (if (nil? hash)
       result
-      (let [node (get-in state [:nodes hash])]
+      (let [node (get nodes hash)]
         (when-not node
           (codec/fail! :bitcoin.consensus/corrupt-chainstate
                        "Active chain references a missing node."
@@ -64,9 +69,10 @@
   (let [state (cond-> state
                 (= 1 (:format state))
                 (assoc :best-header (:active-tip state)))
-        path (active-path state)
-        tip (get-in state [:nodes (:active-tip state)])
-        best-header (get-in state [:nodes (:best-header state)])]
+        nodes (:nodes state)
+        path (active-path nodes (:active-tip state))
+        tip (get nodes (:active-tip state))
+        best-header (get nodes (:best-header state))]
     (when-not best-header
       (codec/fail! :bitcoin.consensus/corrupt-chainstate
                    "Best header references a missing node."
@@ -81,17 +87,17 @@
                    "UTXO height differs from the active tip height."
                    {:tip-height (:height tip)
                     :utxo-height (get-in state [:utxo :height])}))
-    (doseq [[hash node] (:nodes state)]
+    (doseq [[hash node] nodes]
       (when-not (= hash (:hash node))
         (codec/fail! :bitcoin.consensus/corrupt-chainstate
                      "Node map key differs from its block hash."
                      {:key hash :hash (:hash node)}))
       (when-let [parent-hash (:parent node)]
-        (let [parent (get-in state [:nodes parent-hash])]
+        (let [parent (get nodes parent-hash)]
           (when-not (and parent
                          (= (inc (:height parent)) (:height node))
-                         (= (get-in parent [:header :hash])
-                            (get-in node [:header :prev-block])))
+                         (= (:hash (:header parent))
+                            (:prev-block (:header node))))
             (codec/fail! :bitcoin.consensus/corrupt-chainstate
                          "Node parent linkage or height is inconsistent."
                          {:hash hash :parent parent-hash}))))
@@ -101,8 +107,9 @@
                      {:hash hash :active? (:active? node)})))
     (dissoc state :format)))
 
-(defn decode
-  [bytes expected-network]
+(defn decode-value
+  "Decode checksummed EDN without imposing chainstate structure."
+  [bytes]
   (let [text (String. ^bytes bytes StandardCharsets/UTF_8)
         newline (.indexOf text "\n")]
     (when-not (= 64 newline)
@@ -115,7 +122,11 @@
         (codec/fail! :bitcoin.consensus/chainstate-checksum-mismatch
                      "Snapshot checksum does not match its contents." {}))
       (binding [*read-eval* false]
-        (validate! (edn/read-string body) expected-network)))))
+        (edn/read-string body)))))
+
+(defn decode
+  [bytes expected-network]
+  (validate! (decode-value bytes) expected-network))
 
 (defn save!
   "Atomically replace `path` with a durable snapshot."
