@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2 — 2026-07-30
+
+- Parameterize the live Core differential for long regtest histories.
+- Atomically persist and reload the kernel chainstate at configurable intervals
+  during differential validation to prove restart-safe continuation.
+- Wait for the temporary Core daemon to exit before cleanup.
+
 ## 0.5.1 — 2026-07-30
 
 - Activate an authenticated AssumeUTXO state only when its base is on the

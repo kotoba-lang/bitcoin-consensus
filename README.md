@@ -60,4 +60,9 @@ clojure -M:lint
 clojure -M:coverage
 ./scripts/core_regtest_differential.sh # requires bitcoind + bitcoin-cli
 ./scripts/core_script_vectors.sh       # pinned Bitcoin Core v31.1 vectors
+
+# Long differential with restart/reload every 250 blocks:
+CONSENSUS_DIFFERENTIAL_BLOCKS=1003 \
+CONSENSUS_RESTART_INTERVAL=250 \
+./scripts/core_regtest_differential.sh
 ```
