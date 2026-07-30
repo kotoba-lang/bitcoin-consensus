@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-07-30
+
+- Activate witness and Taproot Script flags only at their buried or
+  versionbits-derived deployment state instead of applying post-soft-fork
+  semantics to historical blocks.
+
 ## 0.6.0 — 2026-07-30
 
 - Match all 1,222 Bitcoin Core v31.1 Script vector outcomes with no skipped

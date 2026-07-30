@@ -75,21 +75,38 @@
 
 (defn script-flags
   "Bitcoin Core block-consensus Script flags for a known deployment state."
-  [{:keys [bip65-height bip66-height csv-height segwit-height
-           script-flag-exceptions]}
-   height block-hash]
-  (or (get script-flag-exceptions block-hash)
-      (cond-> #{:p2sh :witness :taproot}
-        (>= height bip66-height) (conj :dersig)
-        (>= height bip65-height) (conj :cltv)
-        (>= height csv-height) (conj :csv)
-        (>= height segwit-height) (conj :null-dummy))))
+  ([parameters height block-hash]
+   (let [{:keys [taproot-height taproot-deployment]} parameters]
+     (script-flags
+      parameters height block-hash
+      (or (true? (:always-active? taproot-deployment))
+          (and (integer? taproot-height)
+               (>= height taproot-height))))))
+  ([{:keys [bip65-height bip66-height csv-height segwit-height
+            script-flag-exceptions]}
+    height block-hash taproot-active?]
+   (or (get script-flag-exceptions block-hash)
+       (cond-> #{:p2sh}
+         (>= height bip66-height) (conj :dersig)
+         (>= height bip65-height) (conj :cltv)
+         (>= height csv-height) (conj :csv)
+         (>= height segwit-height) (conj :witness :null-dummy)
+         (and (>= height segwit-height) taproot-active?) (conj :taproot)))))
 
 #?(:clj
    (defn- verifier-for
      [state height block-hash override]
      (or override
-         (let [flags (script-flags (:consensus state) height block-hash)]
+         (let [flags
+               (script-flags
+                (:consensus state) height block-hash
+                (or (= :active
+                       (get-in state
+                               [:nodes block-hash :deployments :taproot]))
+                    (true?
+                     (get-in state
+                             [:consensus :taproot-deployment
+                              :always-active?]))))]
            (fn [transaction input-index coin]
              (script/verify-input transaction input-index coin flags)))))
    :cljs

@@ -712,10 +712,16 @@
         before (chainstate/script-flags mainnet 363724 "ordinary")
         dersig (chainstate/script-flags mainnet 363725 "ordinary")
         segwit (chainstate/script-flags mainnet 481824 "ordinary")]
-    (is (= #{:p2sh :witness :taproot} before))
+    (is (= #{:p2sh} before))
     (is (contains? dersig :dersig))
     (is (not (contains? dersig :cltv)))
+    (is (not (contains? dersig :witness)))
     (is (contains? segwit :null-dummy))
+    (is (contains? segwit :witness))
+    (is (not (contains? segwit :taproot)))
+    (is (contains?
+         (chainstate/script-flags mainnet 709632 "ordinary")
+         :taproot))
     (is (= #{}
            (chainstate/script-flags
             mainnet 170060
