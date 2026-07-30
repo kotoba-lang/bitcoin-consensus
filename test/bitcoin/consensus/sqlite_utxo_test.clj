@@ -166,6 +166,13 @@
           (is (nil? (sqlite/lookup reopened [txid-a 0])))
           (is (= coin-b (sqlite/lookup reopened [txid-b 7])))
           (is (= {:integrity :ok :coin-count 1
+                  :undo-integrity :ok
+                  :retained-undo-blocks 2
+                  :earliest-undo-height 0
+                  :latest-undo-height 1
+                  :undo-rows 3
+                  :undo-pruned-through-height -1
+                  :available-reorg-depth 2
                   :header-integrity :ok :header-nodes 0}
                  (sqlite/integrity-check! reopened)))
           (is (= {:height 0 :tip "block-0" :coin-count 1}
@@ -190,6 +197,62 @@
                    (try
                      (sqlite/open {:path path :network :testnet})
                      (catch clojure.lang.ExceptionInfo error error)))))))))))
+
+(deftest undo-pruning-is-bounded-monotonic-and-explicit-about-recovery
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})]
+        (doseq [height (range 5)]
+          (let [key [(soak-txid height) 0]]
+            (sqlite/commit-block!
+             (utxo/-coin-assoc
+              (sqlite/begin backend) key (soak-coin height))
+             {:block-hash (str "pruned-" height)
+              :parent-hash
+              (when (pos? height) (str "pruned-" (dec height)))
+              :height height :previous-height (dec height)
+              :undo {:height (dec height)
+                     :spent {} :created #{key}}
+              :retain-undo-blocks 2})))
+        (is (= {:retained-undo-blocks 2
+                :earliest-undo-height 3
+                :latest-undo-height 4
+                :undo-rows 2
+                :undo-pruned-through-height 2
+                :available-reorg-depth 2}
+               (sqlite/undo-status backend)))
+        (is (= :ok (:undo-integrity (sqlite/integrity-check! backend))))
+        (is (= 0 (:deleted-undo-blocks
+                  (sqlite/prune-undo! backend 10))))
+        (is (= 2 (:undo-pruned-through-height
+                  (sqlite/undo-status backend)))
+            "a larger future window cannot recreate deleted history")
+        (sqlite/disconnect-tip! backend "pruned-4")
+        (sqlite/disconnect-tip! backend "pruned-3")
+        (is (= {:retained-undo-blocks 0
+                :earliest-undo-height nil
+                :latest-undo-height nil
+                :undo-rows 0
+                :undo-pruned-through-height 2
+                :available-reorg-depth 0}
+               (sqlite/undo-status backend)))
+        (let [error
+              (try
+                (sqlite/disconnect-tip! backend "pruned-2")
+                (catch clojure.lang.ExceptionInfo failure failure))]
+          (is (= :bitcoin.consensus/undo-pruned
+                 (:type (ex-data error))))
+          (is (= :reindex-from-authenticated-history
+                 (:recovery (ex-data error))))
+          (is (= 2 (:undo-pruned-through-height
+                    (ex-data error)))))
+        (is (= :bitcoin.consensus/undo-retention
+               (:type
+                (ex-data
+                 (try
+                   (sqlite/prune-undo! backend 0)
+                   (catch clojure.lang.ExceptionInfo error error))))))
+        (is (= :ok (:undo-integrity (sqlite/integrity-check! backend))))))))
 
 (deftest normalized-headers-upsert-and-reopen
   (with-database
@@ -401,6 +464,7 @@
            :transition/after-headers
            :transition/after-pending
            :transition/after-host
+           :transition/after-prune
            :transition/before-commit
            :transition/after-commit]]
     (testing (str fault)
@@ -437,6 +501,7 @@
           [:commit-block/after-undo
            :commit-block/after-coins
            :commit-block/after-meta
+           :commit-block/after-prune
            :commit-block/before-commit
            :commit-block/after-commit]]
     (testing (str fault)
@@ -573,7 +638,14 @@
                  #(when (= % 2) base-hash) options))))
         (is (= coin-a (sqlite/lookup backend [txid-a 0])))
         (is (= {:network :regtest :height 2 :tip base-hash :coin-count 1}
-               (sqlite/status backend)))))))
+               (sqlite/status backend)))
+        (is (= {:retained-undo-blocks 0
+                :earliest-undo-height nil
+                :latest-undo-height nil
+                :undo-rows 0
+                :undo-pruned-through-height 2
+                :available-reorg-depth 0}
+               (sqlite/undo-status backend)))))))
 
 (deftest snapshot-and-host-state-share-one-commit
   (with-database

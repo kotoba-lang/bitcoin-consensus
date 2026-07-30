@@ -29,6 +29,9 @@ This repository is separate from the permanently read-only
   checks, schema migration, normalized fixed-length header nodes, compact host
   metadata, disabled-by-default subprocess crash-test fault points, and
   O(touched outpoints) transition memory
+- monotonic active-chain undo retention with a snapshot-aware prune floor,
+  bounded immediate reorganization depth, typed deep-reorg recovery, and
+  retained-journal linkage audits
 - provably unspendable output pruning and signed transaction-version handling
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data

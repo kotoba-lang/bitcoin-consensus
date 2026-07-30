@@ -13,7 +13,7 @@
            [javax.sql DataSource]
            [org.sqlite SQLiteDataSource]))
 
-(def schema-version 5)
+(def schema-version 6)
 (def maximum-pending-block-bytes 4000000)
 (def maximum-pending-block-count 4096)
 (def maximum-pending-total-bytes (* 4 1024 1024 1024))
@@ -74,6 +74,8 @@
       FOREIGN KEY(block_hash) REFERENCES consensus_undo_blocks(block_hash)
         ON DELETE CASCADE
     ) WITHOUT ROWID"
+   "CREATE UNIQUE INDEX IF NOT EXISTS consensus_undo_height
+      ON consensus_undo_blocks(height)"
    "CREATE TABLE IF NOT EXISTS consensus_host_state (
       id INTEGER PRIMARY KEY CHECK(id = 1),
       bytes BLOB NOT NULL,
@@ -209,6 +211,24 @@
              ON CONFLICT(key) DO UPDATE SET value = excluded.value"
             [key (str value)]))
 
+(defn- undo-prune-height* [^Connection connection]
+  (parse-long (or (meta-value connection "undo_prune_height") "-1")))
+
+(defn- initialize-undo-prune-height! [^Connection connection]
+  (when-not (meta-value connection "undo_prune_height")
+    ;; Legacy databases predate an explicit availability floor. Preserve every
+    ;; existing journal and describe an already-missing prefix as unavailable;
+    ;; this does not infer or recreate validation data.
+    (let [height (parse-long (meta-value connection "height"))
+          earliest
+          (first-row
+           connection "SELECT min(height) FROM consensus_undo_blocks" []
+           (fn [^ResultSet result]
+             (let [value (.getObject result 1)]
+               (when value (.longValue ^Number value)))))
+          floor (if earliest (dec earliest) height)]
+      (put-meta! connection "undo_prune_height" (max -1 floor)))))
+
 (defn open
   "Open or initialize a network-bound UTXO database."
   [{:keys [path datasource network busy-timeout-ms]
@@ -233,7 +253,7 @@
       (let [stored-version (meta-value connection "schema_version")
             stored-network (meta-value connection "network")]
         (when (and stored-version
-                   (not (contains? #{1 2 3 4 schema-version}
+                   (not (contains? #{1 2 3 4 5 schema-version}
                                    (parse-long stored-version))))
           (fail! :bitcoin.consensus/sqlite-schema
                  "Unsupported SQLite UTXO schema."
@@ -249,7 +269,8 @@
         (put-meta! connection "network" (name network))
         (when-not (meta-value connection "height")
           (put-meta! connection "height" -1)
-          (put-meta! connection "coin_count" 0))))
+          (put-meta! connection "coin_count" 0))
+        (initialize-undo-prune-height! connection)))
     (->SQLiteUTXO source busy-timeout-ms network)))
 
 (defn status [backend]
@@ -258,6 +279,72 @@
      :height (parse-long (meta-value connection "height"))
      :tip (meta-value connection "tip")
      :coin-count (parse-long (meta-value connection "coin_count"))}))
+
+(defn- undo-status* [^Connection connection]
+  (let [height (parse-long (meta-value connection "height"))
+        floor (undo-prune-height* connection)
+        summary
+        (first-row
+         connection
+         "SELECT count(*), min(height), max(height),
+                 (SELECT count(*) FROM consensus_undo)
+            FROM consensus_undo_blocks"
+         []
+         (fn [^ResultSet result]
+           {:retained-undo-blocks (.getLong result 1)
+            :earliest-undo-height
+            (some-> (.getObject result 2) ^Number .longValue)
+            :latest-undo-height
+            (some-> (.getObject result 3) ^Number .longValue)
+            :undo-rows (.getLong result 4)}))]
+    (assoc summary
+           :undo-pruned-through-height floor
+           :available-reorg-depth (max 0 (- height floor)))))
+
+(defn undo-status
+  "Return the durable active-chain undo availability window."
+  [backend]
+  (with-open [connection (connection backend)]
+    (undo-status* connection)))
+
+(defn- prune-undo-in-transaction!
+  [^Connection connection retain-blocks]
+  (when-not (and (integer? retain-blocks) (pos? retain-blocks))
+    (fail! :bitcoin.consensus/undo-retention
+           "Undo retention must be a positive block count."
+           {:retain-blocks retain-blocks}))
+  (let [height (parse-long (meta-value connection "height"))
+        previous-floor (undo-prune-height* connection)
+        desired-floor (max -1 (- height retain-blocks))
+        next-floor (max previous-floor desired-floor)
+        deleted
+        (execute!
+         connection
+         "DELETE FROM consensus_undo_blocks WHERE height <= ?"
+         [next-floor])]
+    (put-meta! connection "undo_prune_height" next-floor)
+    (assoc (undo-status* connection)
+           :deleted-undo-blocks deleted
+           :retain-blocks retain-blocks)))
+
+(defn prune-undo!
+  "Atomically retain only the newest active-chain undo journals.
+
+  Bitcoin has no finality: pruning limits immediate reorganization depth. A
+  deeper valid chain requires rebuilding chainstate from authenticated history."
+  [backend retain-blocks]
+  (with-open [connection (connection backend)]
+    (let [auto-commit (.getAutoCommit connection)]
+      (try
+        (.setAutoCommit connection false)
+        (let [result (prune-undo-in-transaction! connection retain-blocks)]
+          (.commit connection)
+          result)
+        (catch Throwable error
+          (.rollback connection)
+          (throw error))
+        (finally
+          (.setAutoCommit connection auto-commit))))))
 
 (defn lookup [backend key]
   (with-open [connection (connection backend)]
@@ -306,7 +393,8 @@
          (commit-block!
           (:coins state)
           {:block-hash block-hash :parent-hash parent-hash
-           :height height :previous-height previous-height :undo undo}))
+           :height height :previous-height previous-height :undo undo
+           :retain-undo-blocks (:retain-undo-blocks options)}))
        (catch Throwable error
          ;; commit-block! closes its view on either outcome; rollback! is
          ;; idempotent and handles validation failures before commit begins.
@@ -718,6 +806,22 @@
       (delete-coin! connection key)
       (insert-coin! connection key value))))
 
+(defn- fail-missing-undo!
+  [^Connection connection block-hash height]
+  (let [floor (undo-prune-height* connection)
+        pruned? (<= height floor)]
+    (fail!
+     (if pruned?
+       :bitcoin.consensus/undo-pruned
+       :bitcoin.consensus/missing-undo)
+     (if pruned?
+       "Required undo was intentionally pruned; chainstate must be rebuilt."
+       "Active block lacks a durable undo journal.")
+     {:hash block-hash
+      :height height
+      :undo-pruned-through-height floor
+      :recovery :reindex-from-authenticated-history})))
+
 (defn- pending-status* [connection]
   (first-row
    connection
@@ -882,6 +986,8 @@
              (put-meta! connection "height" base-height)
              (put-meta! connection "tip" base-blockhash)
              (put-meta! connection "coin_count" coins-count)
+             ;; The authenticated snapshot has no pre-base undo journals.
+             (put-meta! connection "undo_prune_height" base-height)
              (when host-state-fn
                (write-host-state! connection (host-state-fn loaded)))
              (write-header-nodes!
@@ -901,7 +1007,8 @@
   "Atomically commit a validated overlay, its reversible undo, and new tip.
   The database tip must still equal `parent-hash`/`previous-height`."
   [^CoinOverlay view
-   {:keys [block-hash parent-hash height previous-height undo]}]
+   {:keys [block-hash parent-hash height previous-height undo
+           retain-undo-blocks]}]
   (let [^Connection connection (:connection view)]
     (when @(:closed? view)
       (fail! :bitcoin.consensus/closed-utxo-view
@@ -931,6 +1038,9 @@
           (put-meta! connection "tip" block-hash)
           (put-meta! connection "coin_count" next-count)
           (fault-point! :commit-block/after-meta)
+          (when retain-undo-blocks
+            (prune-undo-in-transaction! connection retain-undo-blocks))
+          (fault-point! :commit-block/after-prune)
           (fault-point! :commit-block/before-commit)
           (.commit connection)
           (fault-point! :commit-block/after-commit)
@@ -951,7 +1061,8 @@
   the freshly validated undo delta."
   [^CoinOverlay view
    {:keys [expected-tip expected-height new-tip new-height
-           detach attach host-state-bytes header-nodes pending-delete]}]
+           detach attach host-state-bytes header-nodes pending-delete
+           retain-undo-blocks]}]
   (let [^Connection connection (:connection view)]
     (when @(:closed? view)
       (fail! :bitcoin.consensus/closed-utxo-view
@@ -985,9 +1096,8 @@
                            :height (.getLong result 2)
                            :previous-height (.getLong result 3)}))]
                    (when-not (and row (= current-height (:height row)))
-                     (fail! :bitcoin.consensus/missing-undo
-                            "Detached block lacks matching durable undo."
-                            {:hash block-hash :height current-height}))
+                     (fail-missing-undo!
+                      connection block-hash current-height))
                    (execute!
                     connection
                     "DELETE FROM consensus_undo_blocks WHERE block_hash = ?"
@@ -1030,6 +1140,9 @@
           (when host-state-bytes
             (write-host-state! connection host-state-bytes))
           (fault-point! :transition/after-host)
+          (when retain-undo-blocks
+            (prune-undo-in-transaction! connection retain-undo-blocks))
+          (fault-point! :transition/after-prune)
           (fault-point! :transition/before-commit)
           (.commit connection)
           (fault-point! :transition/after-commit)
@@ -1065,9 +1178,9 @@
                    "Refusing to disconnect a non-tip block."
                    {:expected expected-block-hash :actual tip}))
           (when-not block
-            (fail! :bitcoin.consensus/missing-undo
-                   "SQLite UTXO tip has no durable undo journal."
-                   {:hash expected-block-hash}))
+            (fail-missing-undo!
+             connection expected-block-hash
+             (parse-long (meta-value connection "height"))))
           (with-open [statement
                       (bind!
                        (.prepareStatement
@@ -1112,8 +1225,61 @@
         (finally
           (.setAutoCommit connection auto-commit))))))
 
+(defn- undo-integrity-check! [^Connection connection]
+  (let [height (parse-long (meta-value connection "height"))
+        tip (meta-value connection "tip")
+        {:keys [retained-undo-blocks earliest-undo-height
+                latest-undo-height undo-pruned-through-height]
+         :as undo-status}
+        (undo-status* connection)
+        expected (max 0 (- height undo-pruned-through-height))
+        bad-heights
+        (first-row
+         connection
+         "SELECT count(*) FROM consensus_undo_blocks
+           WHERE previous_height <> height - 1"
+         [] #(.getLong ^ResultSet % 1))
+        broken-links
+        (first-row
+         connection
+         "SELECT count(*)
+            FROM consensus_undo_blocks child
+            LEFT JOIN consensus_undo_blocks parent
+              ON parent.block_hash = child.parent_hash
+           WHERE child.height > ?
+             AND (parent.block_hash IS NULL
+                  OR parent.height <> child.previous_height)"
+         [(inc undo-pruned-through-height)]
+         #(.getLong ^ResultSet % 1))
+        retained-tip
+        (when (pos? expected)
+          (first-row
+           connection
+           "SELECT block_hash FROM consensus_undo_blocks WHERE height = ?"
+           [height] #(.getString ^ResultSet % 1)))]
+    (when-not
+     (and (<= -1 undo-pruned-through-height height)
+          (= expected retained-undo-blocks)
+          (if (zero? expected)
+            (and (nil? earliest-undo-height)
+                 (nil? latest-undo-height))
+            (and (= (inc undo-pruned-through-height)
+                    earliest-undo-height)
+                 (= height latest-undo-height)
+                 (= tip retained-tip)))
+          (zero? bad-heights)
+          (zero? broken-links))
+      (fail!
+       :bitcoin.consensus/sqlite-undo-integrity
+       "Active-chain undo availability or linkage is inconsistent."
+       (assoc undo-status
+              :height height :tip tip :expected-blocks expected
+              :bad-heights bad-heights :broken-links broken-links
+              :retained-tip retained-tip)))
+    (assoc undo-status :undo-integrity :ok)))
+
 (defn integrity-check!
-  "Audit SQLite pages, UTXO metadata, and normalized header cryptography."
+  "Audit SQLite pages, UTXO/undo metadata, and normalized header cryptography."
   [backend]
   (with-open [connection (connection backend)]
     (let [integrity
@@ -1131,6 +1297,7 @@
                "SQLite UTXO metadata count is inconsistent."
                {:expected claimed :actual actual}))
       (merge {:integrity :ok :coin-count actual}
+             (undo-integrity-check! connection)
              (header-integrity-check! backend)))))
 
 (defn entries

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.0 — 2026-07-31
+
+- Add schema-v6 monotonic active-chain undo pruning with a persisted,
+  snapshot-aware availability floor and a unique height index.
+- Bound immediate reorganization history without treating pruning as Bitcoin
+  finality; deeper detach attempts fail with an explicit authenticated-history
+  reindex requirement.
+- Audit retained undo count, height range, parent linkage, tip binding, and
+  UTXO metadata alongside SQLite and normalized-header integrity.
+- Allow block and multi-table fork commits to prune inside their existing
+  atomic boundary, with additional pre/post-prune hard-crash coverage.
+
 ## 0.12.0 — 2026-07-30
 
 - Add disabled-by-default, process-local fault points around linear block and
