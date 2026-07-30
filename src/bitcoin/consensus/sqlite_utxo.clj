@@ -519,6 +519,21 @@
             batch))]
       (execute! connection sql params))))
 
+(defn- write-produced-header-nodes!
+  [^Connection connection produce!]
+  (let [pending (volatile! [])
+        flush!
+        (fn []
+          (when (seq @pending)
+            (write-header-nodes! connection @pending)
+            (vreset! pending [])))]
+    (produce!
+     (fn [node]
+       (vswap! pending conj node)
+       (when (= 500 (count @pending))
+         (flush!))))
+    (flush!)))
+
 (defn- decode-stored-header [hash natural-hash raw]
   {:version (header/bytes->int32-le (subvec raw 0 4))
    :prev-block (subvec raw 4 36)
@@ -587,6 +602,28 @@
   "Load normalized header/fork-choice nodes keyed by display-order hash."
   [backend]
   (blob-header-nodes backend))
+
+(defn consume-header-nodes!
+  "Stream normalized header nodes through `consume!` with one read cursor.
+
+  The callback must not retain nodes when constant-memory operation is
+  required. Returns the number of consumed rows."
+  [backend consume!]
+  (when-not (ifn? consume!)
+    (fail! :bitcoin.consensus/sqlite-header-consumer
+           "Normalized header consumer must be callable." {}))
+  (with-open [^Connection connection (connection backend)
+              ^PreparedStatement statement
+              (.prepareStatement
+               connection
+               "SELECT node FROM consensus_header_nodes")
+              ^ResultSet result (.executeQuery statement)]
+    (loop [count 0]
+      (if (.next result)
+        (do
+          (consume! (decode-header-node (.getBytes result 1)))
+          (recur (inc count)))
+        count))))
 
 (defn header-node
   "Load one normalized header node by display-order hash.
@@ -1053,7 +1090,9 @@
   failure rolls back every inserted coin.
 
   `:host-state-fn`, when present, receives the authenticated non-materialized
-  state and returns host-state bytes committed in the same transaction."
+  state and returns host-state bytes committed in the same transaction.
+  `:header-node-producer-fn` receives that state and a bounded emitter, allowing
+  another normalized database to stream headers into the same commit."
   ([backend source header-at-height]
    (import-snapshot! backend source header-at-height {}))
   ([backend source header-at-height options]
@@ -1073,11 +1112,14 @@
            (let [host-state-fn (:host-state-fn options)
                  header-nodes (:header-nodes options)
                  header-nodes-fn (:header-nodes-fn options)
+                 header-node-producer-fn
+                 (:header-node-producer-fn options)
                  loaded
                  (assumeutxo/load-snapshot
                   source (:network backend) header-at-height
                   (-> options
-                      (dissoc :host-state-fn :header-nodes :header-nodes-fn)
+                      (dissoc :host-state-fn :header-nodes :header-nodes-fn
+                              :header-node-producer-fn)
                       (assoc :materialize? false
                              :coin-consumer
                              #(insert-coin-statement!
@@ -1091,11 +1133,15 @@
              (put-meta! connection "undo_prune_height" base-height)
              (when host-state-fn
                (write-host-state! connection (host-state-fn loaded)))
-             (write-header-nodes!
-              connection
-              (if header-nodes-fn
-                (header-nodes-fn loaded)
-                header-nodes))
+             (if header-node-producer-fn
+               (write-produced-header-nodes!
+                connection
+                #(header-node-producer-fn loaded %))
+               (write-header-nodes!
+                connection
+                (if header-nodes-fn
+                  (header-nodes-fn loaded)
+                  header-nodes)))
              (.commit connection)
              (:snapshot loaded)))
          (catch Throwable error

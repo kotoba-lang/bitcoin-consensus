@@ -1284,6 +1284,21 @@
                 (fn [_state tip]
                   (is (= base-hash tip))
                   #{base-hash active-hash})}))))
+      (let [captured (atom nil)
+            lazy-activated
+            (assumeutxo/activate
+             header-state loaded
+             {:ancestor-hash-at-height-fn
+              (fn [& _] base-hash)
+              :ancestry-hashes-fn
+              (fn [& _] #{base-hash active-hash})
+              :activate-nodes-fn
+              (fn [nodes active-path]
+                (reset! captured active-path)
+                nodes)})]
+        (is (identical? (:nodes header-state)
+                        (:nodes lazy-activated)))
+        (is (= #{base-hash active-hash} @captured)))
       (is (= :bitcoin.consensus/snapshot-ancestry
              (error-type
               #(assumeutxo/activate

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.0 — 2026-07-31
+
+- Let authenticated snapshot hosts retain a lazy normalized node map while
+  supplying active-path annotation through a bounded header producer.
+- Stream normalized headers between SQLite databases in 500-row batches,
+  avoiding a million-node in-memory activation map.
+
 ## 0.17.0 — 2026-07-31
 
 - Add a bounded normalized-ancestry window cursor so sequential block

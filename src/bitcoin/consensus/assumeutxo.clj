@@ -457,7 +457,8 @@
   header chain and has strictly more work than the current active tip."
   ([header-state loaded] (activate header-state loaded {}))
   ([header-state loaded
-    {:keys [ancestor-hash-at-height-fn ancestry-hashes-fn]}]
+    {:keys [ancestor-hash-at-height-fn ancestry-hashes-fn
+            activate-nodes-fn]}]
    (let [{:keys [base-height base-blockhash]} (:snapshot loaded)
         base-node (get-in header-state [:nodes base-blockhash])
         best-hash (:best-header header-state)
@@ -502,9 +503,11 @@
                  :snapshot (:snapshot loaded))
           (update :nodes
                   (fn [nodes]
-                    (into {}
-                          (map (fn [[hash node]]
-                                 [hash
-                                  (assoc node :active?
-                                         (contains? active-path hash))]))
-                          nodes))))))))
+                    (if activate-nodes-fn
+                      (activate-nodes-fn nodes active-path)
+                      (into {}
+                            (map (fn [[hash node]]
+                                   [hash
+                                    (assoc node :active?
+                                           (contains? active-path hash))]))
+                            nodes)))))))))

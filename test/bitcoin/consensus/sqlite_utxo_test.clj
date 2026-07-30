@@ -725,6 +725,47 @@
         (is (= base-hash (:tip (sqlite/status backend))))
         (is (= coin-a (sqlite/lookup backend [txid-a 0])))))))
 
+(deftest snapshot-streams-produced-normalized-headers-in-the-same-commit
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            base-hash (apply str (repeat 64 "6"))
+            snapshot (snapshot-bytes base-hash [[txid-a 0] coin-a])
+            commitment
+            (assumeutxo/hash-serialized {[txid-a 0] coin-a})
+            decoded
+            (header/decode-block-header
+             (header/hex->bytes header/regtest-genesis-header-hex))
+            node
+            {:hash (:hash-hex decoded) :parent nil :height 0
+             :header decoded :block nil
+             :chainwork
+             (vec (concat (header/uint-le->bytes 1 4) (repeat 28 0)))
+             :undo nil :deployments {:taproot :active}
+             :active? true :header-valid? true
+             :block-valid? true :scripts-checked? true}
+            produced (atom 0)]
+        (sqlite/import-snapshot!
+         backend snapshot #(when (= % 2) base-hash)
+         {:checkpoints
+          {2 {:blockhash base-hash
+              :hash-serialized commitment :chain-tx-count 3}}
+          :header-node-producer-fn
+          (fn [loaded emit!]
+            (is (nil? (get-in loaded [:utxo :coins])))
+            (swap! produced inc)
+            (emit! node))})
+        (is (= 1 @produced))
+        (is (= (select-keys node
+                            [:hash :parent :height :active?
+                             :header-valid? :block-valid?
+                             :scripts-checked?])
+               (select-keys
+                (sqlite/header-node backend (:hash node))
+                [:hash :parent :height :active?
+                 :header-valid? :block-valid?
+                 :scripts-checked?])))))))
+
 (deftest disk-hash-serialized-matches-in-memory-ordering
   (with-database
     (fn [path]
