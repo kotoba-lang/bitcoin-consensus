@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.4 — 2026-07-30
+
+- Consume `org-bitcoin-p2p` v0.4.1 so real peers' full-range uint64 nonces
+  decode without JVM overflow and `net_addr` ports use network byte order.
+
 ## 0.7.3 — 2026-07-30
 
 - Match Bitcoin Core genesis semantics: validate and index genesis, but never
