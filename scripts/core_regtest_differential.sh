@@ -45,8 +45,10 @@ result="$(
     done
   } | clojure -M -e '
     (require (quote bitcoin.consensus.block)
+             (quote bitcoin.consensus.chainstate)
              (quote clojure.string))
-    (let [lines (line-seq (java.io.BufferedReader. *in*))]
+    (let [lines (line-seq (java.io.BufferedReader. *in*))
+          chainstate (volatile! nil)]
       (doseq [[index line] (map-indexed vector lines)]
         (let [[expected-hash expected-size expected-weight hex]
               (clojure.string/split line #"\|")
@@ -61,11 +63,20 @@ result="$(
           (when-not (= expected actual)
             (throw
              (ex-info "Bitcoin Core differential mismatch"
-                      {:height index :expected expected :actual actual})))))
-      (println (str "verified=" (count lines))))'
+                      {:height index :expected expected :actual actual})))
+          (vreset!
+           chainstate
+           (if (zero? index)
+             (bitcoin.consensus.chainstate/initialize :regtest parsed)
+             (bitcoin.consensus.chainstate/accept-block
+              @chainstate parsed 2000000000)))))
+      (println
+       (str "verified=" (count lines)
+            " active-height="
+            (bitcoin.consensus.chainstate/active-height @chainstate))))'
 )"
 
-if [[ "$result" != "verified=13" ]]; then
+if [[ "$result" != "verified=13 active-height=12" ]]; then
   echo "Core/kernel differential did not verify every fixture: '$result'" >&2
   exit 1
 fi

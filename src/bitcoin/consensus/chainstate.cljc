@@ -163,17 +163,19 @@
 (defn coinbase-height-prefix
   "Return the minimally encoded BIP34 script prefix for a block height."
   [height]
-  (let [number
-        (loop [value height result []]
-          (if (zero? value)
-            result
-            (recur (quot value 256) (conj result (mod value 256)))))
-        number (cond
-                 (empty? number) []
-                 (not (zero? (bit-and 0x80 (peek number))))
-                 (conj number 0)
-                 :else number)]
-    (into [(count number)] number)))
+  (cond
+    (zero? height) [0x00]
+    (<= 1 height 16) [(+ 0x50 height)]
+    :else
+    (let [number
+          (loop [value height result []]
+            (if (zero? value)
+              result
+              (recur (quot value 256) (conj result (mod value 256)))))
+          number (if (not (zero? (bit-and 0x80 (peek number))))
+                   (conj number 0)
+                   number)]
+      (into [(count number)] number))))
 
 (defn- starts-with? [value prefix]
   (= prefix (vec (take (count prefix) value))))
@@ -186,7 +188,9 @@
     (when-not (starts-with? actual expected)
       (codec/fail! :bitcoin.consensus/bad-coinbase-height
                    "Coinbase scriptSig does not begin with the block height."
-                   {:height height :expected expected}))))
+                   {:height height :expected expected
+                    :actual-prefix
+                    (vec (take (max 8 (count expected)) actual))}))))
 
 (defn- median-time-past [state parent]
   (let [timestamps

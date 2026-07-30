@@ -439,7 +439,9 @@
               0 coin))))))
 
 (deftest bip34-height-prefix-is-minimally-script-number-encoded
-  (is (= [1 1] (chainstate/coinbase-height-prefix 1)))
+  (is (= [0x51] (chainstate/coinbase-height-prefix 1)))
+  (is (= [0x60] (chainstate/coinbase-height-prefix 16)))
+  (is (= [1 17] (chainstate/coinbase-height-prefix 17)))
   (is (= [2 128 0] (chainstate/coinbase-height-prefix 128)))
   (is (= [2 244 1] (chainstate/coinbase-height-prefix 500))))
 
