@@ -8,6 +8,7 @@ This repository is separate from the permanently read-only
 ## Implemented
 
 - bounded, canonical CompactSize and raw legacy/SegWit transaction decoding
+- unsigned 64-bit amount decoding without host integer overflow
 - txid/wtxid, exact transaction and block weight, money-range and prevout checks
 - transaction Merkle trees with CVE-2012-2459-style mutation detection
 - BIP141 witness commitment validation
@@ -35,4 +36,5 @@ currently JVM-only; the consensus state and sync scheduler remain pure values.
 clojure -M:test
 clojure -M:lint
 clojure -M:coverage
+./scripts/core_regtest_differential.sh # requires bitcoind + bitcoin-cli
 ```

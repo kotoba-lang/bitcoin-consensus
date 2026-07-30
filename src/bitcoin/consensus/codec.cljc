@@ -18,7 +18,7 @@
 (defn read-uint-le [bytes offset length]
   (let [[value next-offset] (read-bytes bytes offset length)]
     [(reduce (fn [result byte] (+ (* result 256) byte))
-             0 (reverse value))
+             0N (reverse value))
      next-offset]))
 
 (defn uint-le [value length]
@@ -26,7 +26,7 @@
     (if (zero? remaining)
       result
       (recur (quot value 256) (dec remaining)
-             (conj result (mod value 256))))))
+             (conj result (int (mod value 256)))))))
 
 (defn read-compact-size
   "Decode a canonical CompactSize and return [value next-offset]."

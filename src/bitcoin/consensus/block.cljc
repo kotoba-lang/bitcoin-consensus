@@ -74,6 +74,16 @@
                          {:output-index (:index commitment)})))))
     commitment))
 
+(defn serialize
+  "Serialize a parsed block without trusting cached size or weight fields."
+  [{:keys [header transactions]}]
+  (vec
+   (concat (header/encode-block-header header)
+           (codec/compact-size (count transactions))
+           (mapcat (fn [value]
+                     (or (:raw value) (transaction/serialize value)))
+                   transactions))))
+
 (defn parse [bytes]
   (let [bytes (vec bytes)
         _ (when (> (count bytes) max-block-bytes)

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-07-30
+
+- Add parsed block serialization for P2P and differential tooling.
+- Add deterministic adversarial decoder fuzz cases and exhaustively mutate
+  every byte of the mainnet genesis fixture.
+- Decode unsigned 64-bit wire integers without JVM `long` overflow and keep
+  serialized byte values compatible with the hashing backend.
+- Add a live Bitcoin Core v31 regtest differential harness.
+
 ## 0.2.0 — 2026-07-30
 
 - Add checksummed, atomic JVM chainstate persistence.
