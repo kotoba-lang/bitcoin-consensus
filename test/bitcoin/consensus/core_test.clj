@@ -1,5 +1,6 @@
 (ns bitcoin.consensus.core-test
   (:require [bitcoin.consensus.block :as block]
+            [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sighash :as sighash]
@@ -37,6 +38,58 @@
     (try
       (function)
       (catch clojure.lang.ExceptionInfo exception exception)))))
+
+(defn core-varint [value]
+  (loop [value value result []]
+    (let [byte (bit-or (bit-and value 0x7f)
+                       (if (seq result) 0x80 0))]
+      (if (<= value 0x7f)
+        (vec (cons byte result))
+        (recur (dec (quot value 128)) (cons byte result))))))
+
+(defn core-compress-amount [amount]
+  (if (zero? amount)
+    0
+    (loop [amount amount exponent 0]
+      (if (and (zero? (mod amount 10)) (< exponent 9))
+        (recur (quot amount 10) (inc exponent))
+        (if (< exponent 9)
+          (let [digit (mod amount 10)]
+            (+ 1 (* 10 (+ (* 9 (quot amount 10)) digit -1))
+               exponent))
+          (+ 1 (* 10 (dec amount)) 9))))))
+
+(defn core-snapshot-fixture [base-hash coins]
+  (let [groups (partition-by (comp first first)
+                             (sort-by first coins))
+        bytes
+        (vec
+         (concat assumeutxo/snapshot-magic
+                 (codec/uint-le assumeutxo/snapshot-version 2)
+                 (assumeutxo/network-magic :regtest)
+                 (reverse (hex->bytes base-hash))
+                 (codec/uint-le (count coins) 8)
+                 (mapcat
+                  (fn [group]
+                    (let [txid (first (ffirst group))]
+                      (concat
+                       txid
+                       (codec/compact-size (count group))
+                       (mapcat
+                        (fn [[[ _ vout] coin]]
+                          (concat
+                           (codec/compact-size vout)
+                           (core-varint
+                            (+ (* 2 (:height coin))
+                               (if (:coinbase? coin) 1 0)))
+                           (core-varint
+                            (core-compress-amount (:value coin)))
+                           (core-varint
+                            (+ 6 (count (:script-pubkey coin))))
+                           (:script-pubkey coin)))
+                        group))))
+                  groups)))]
+    (byte-array (map unchecked-byte bytes))))
 
 (defn regtest-coinbase [height branch]
   (transaction/parse
@@ -349,7 +402,7 @@
     (is (true? (script/verify-input signed 0 coin)))
     (is (true? (script/verify-input
                 lax-signed 0 coin #{:p2sh :witness})))
-    (is (= :bitcoin.consensus/eval-false
+    (is (= :bitcoin.consensus/signature-der
            (error-type
             #(script/verify-input
               lax-signed 0 coin #{:p2sh :witness :dersig}))))
@@ -570,6 +623,70 @@
     (is (true? (get-in connected
                        [:nodes (:active-tip connected) :block-valid?])))
     (is (= 2 (count (get-in connected [:utxo :coins]))))))
+
+(deftest headers-first-sync-never-activates-unreceived-block-data
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        first-block (mine-regtest-block genesis 1 41)
+        second-block (mine-regtest-block first-block 2 41)
+        first-hash (get-in first-block [:header :hash-hex])
+        second-hash (get-in second-block [:header :hash-hex])
+        headers
+        (-> (chainstate/initialize :regtest genesis (constantly true))
+            (chainstate/accept-header (:header first-block) 2000000000)
+            (chainstate/accept-header (:header second-block) 2000000000))]
+    (is (= 0 (chainstate/active-height headers)))
+    (is (= second-hash (:best-header headers)))
+    (is (nil? (get-in headers [:nodes first-hash :block])))
+    (is (true? (get-in headers [:nodes second-hash :header-valid?])))
+    (let [first-connected
+          (chainstate/accept-block headers first-block 2000000000
+                                   (constantly true))
+          second-connected
+          (chainstate/accept-block first-connected second-block 2000000000
+                                   (constantly true))]
+      (is (= 1 (chainstate/active-height first-connected)))
+      (is (= 2 (chainstate/active-height second-connected)))
+      (is (= second-hash (:best-header second-connected)))
+      (is (true? (get-in second-connected
+                         [:nodes second-hash :scripts-checked?]))))))
+
+(deftest assumevalid-skips-only-buried-best-header-chain-scripts
+  (let [work (header/header-work 0x207fffff)
+        genesis-hash "genesis"
+        assumed-hash "assumed"
+        best-hash "best"
+        base
+        {:best-header best-hash
+         :consensus
+         {:assume-valid-hash assumed-hash
+          :minimum-chainwork header/zero-chainwork}
+         :nodes
+         {genesis-hash
+          {:hash genesis-hash :parent nil :height 0
+           :chainwork work :header {:bits 0x207fffff}}
+          assumed-hash
+          {:hash assumed-hash :parent genesis-hash :height 1
+           :chainwork (header/add-chainwork work work)
+           :header {:bits 0x207fffff}}
+          best-hash
+          {:hash best-hash :parent assumed-hash :height 2017
+           :chainwork
+           (reduce header/add-chainwork
+                   header/zero-chainwork (repeat 2018 work))
+           :header {:bits 0x207fffff}}}}]
+    (is (false? (chainstate/assumevalid-script-check?
+                 base genesis-hash)))
+    (is (true? (chainstate/assumevalid-script-check?
+                base assumed-hash))
+        "the assumevalid block is not itself two weeks behind this best header")
+    (is (true?
+         (chainstate/assumevalid-script-check?
+          (assoc base :best-header assumed-hash) genesis-hash)))
+    (is (true?
+         (chainstate/assumevalid-script-check?
+          (assoc-in base [:consensus :minimum-chainwork]
+                    (vec (repeat 32 0xff)))
+          genesis-hash)))))
 
 (deftest bip68-relative-height-and-time-locks-match-last-invalid-semantics
   (let [base {:version 2
@@ -899,6 +1016,74 @@
       (finally
         (Files/deleteIfExists path)
         (Files/deleteIfExists directory)))))
+
+(deftest core-v2-assumeutxo-snapshot-is-authenticated-before-use
+  (let [base-hash (apply str (repeat 64 "a"))
+        coins
+        {[(vec (repeat 32 1)) 0]
+         {:value 5000000000 :script-pubkey [81]
+          :height 1 :coinbase? true}
+         [(vec (repeat 32 2)) 3]
+         {:value 12345
+          :script-pubkey
+          [0 20 1 2 3 4 5 6 7 8 9 10
+           11 12 13 14 15 16 17 18 19 20]
+          :height 2 :coinbase? false}}
+        commitment
+        "ca9abfa127deafe96f8b562724e772dd0c74523425b32b51365ad51262bc2727"
+        snapshot (core-snapshot-fixture base-hash coins)
+        options
+        {:checkpoints
+         {2 {:blockhash base-hash
+             :hash-serialized commitment
+             :chain-tx-count 3}}}
+        loaded
+        (assumeutxo/load-snapshot
+         snapshot :regtest #(when (= % 2) base-hash) options)]
+    (is (= commitment (assumeutxo/hash-serialized coins)))
+    (is (= coins (get-in loaded [:utxo :coins])))
+    (is (= :assumed (get-in loaded [:snapshot :status])))
+    (is (= 2 (get-in loaded [:snapshot :coins-count])))
+    (is (= :bitcoin.consensus/snapshot-header-mismatch
+           (error-type
+            #(assumeutxo/load-snapshot
+              snapshot :regtest (constantly "wrong") options))))
+    (is (= :bitcoin.consensus/snapshot-network
+           (error-type
+            #(assumeutxo/load-snapshot
+              snapshot :mainnet (constantly base-hash)
+              (assoc options :checkpoints
+                     (get options :checkpoints))))))
+    (let [damaged (aclone snapshot)]
+      (aset-byte damaged (dec (alength damaged))
+                 (unchecked-byte
+                  (bit-xor 1
+                           (bit-and 0xff
+                                    (aget damaged
+                                          (dec (alength damaged)))))))
+      (is (= :bitcoin.consensus/snapshot-commitment
+             (error-type
+              #(assumeutxo/load-snapshot
+                damaged :regtest (constantly base-hash) options)))))
+    (is (= :bitcoin.consensus/snapshot-trailing-data
+           (error-type
+            #(assumeutxo/load-snapshot
+              (byte-array
+               (concat (seq snapshot) [(unchecked-byte 0)]))
+              :regtest (constantly base-hash) options))))
+    (is (= :validated
+           (get-in
+            (assumeutxo/validate-background
+             loaded {:active-tip base-hash
+                     :utxo {:height 2 :coins coins}})
+            [:snapshot :status])))
+    (is (= :bitcoin.consensus/snapshot-background-mismatch
+           (error-type
+            #(assumeutxo/validate-background
+              loaded {:active-tip base-hash
+                      :utxo {:height 2 :coins (dissoc coins
+                                                     [(vec (repeat 32 2))
+                                                      3])}}))))))
 
 (deftest multi-peer-sync-is-bounded-matches-responses-and-requeues-timeouts
   (let [hashes (mapv #(format "%064x" %) (range 20))

@@ -88,4 +88,57 @@ if [[ "$result" != "verified=103 active-height=102" ]]; then
   exit 1
 fi
 
-echo "Core/kernel regtest differential match: $result"
+snapshot_path="$consensus_datadir/utxo.dat"
+snapshot_json="$(
+  bitcoin-cli -regtest -datadir="$consensus_datadir" \
+    dumptxoutset "$snapshot_path" latest
+)"
+snapshot_base="$(jq -r .base_hash <<<"$snapshot_json")"
+snapshot_height="$(jq -r .base_height <<<"$snapshot_json")"
+snapshot_commitment="$(jq -r .txoutset_hash <<<"$snapshot_json")"
+snapshot_chain_txs="$(jq -r .nchaintx <<<"$snapshot_json")"
+snapshot_coins="$(jq -r .coins_written <<<"$snapshot_json")"
+
+snapshot_result="$(
+  CONSENSUS_SNAPSHOT_PATH="$snapshot_path" \
+  CONSENSUS_SNAPSHOT_BASE="$snapshot_base" \
+  CONSENSUS_SNAPSHOT_HEIGHT="$snapshot_height" \
+  CONSENSUS_SNAPSHOT_COMMITMENT="$snapshot_commitment" \
+  CONSENSUS_SNAPSHOT_CHAIN_TXS="$snapshot_chain_txs" \
+  CONSENSUS_SNAPSHOT_COINS="$snapshot_coins" \
+  clojure -M -e '
+    (require (quote bitcoin.consensus.assumeutxo))
+    (let [environment #(System/getenv %)
+          path (environment "CONSENSUS_SNAPSHOT_PATH")
+          base (environment "CONSENSUS_SNAPSHOT_BASE")
+          height (environment "CONSENSUS_SNAPSHOT_HEIGHT")
+          commitment (environment "CONSENSUS_SNAPSHOT_COMMITMENT")
+          chain-txs (environment "CONSENSUS_SNAPSHOT_CHAIN_TXS")
+          expected-coins (environment "CONSENSUS_SNAPSHOT_COINS")
+          height (parse-long height)
+          loaded
+          (bitcoin.consensus.assumeutxo/load-snapshot
+           (java.nio.file.Files/readAllBytes
+            (java.nio.file.Path/of path (make-array String 0)))
+           :regtest
+           #(when (= % height) base)
+           {:checkpoints
+            {height {:blockhash base
+                     :hash-serialized commitment
+                     :chain-tx-count (parse-long chain-txs)}}})]
+      (when-not (= (parse-long expected-coins)
+                   (get-in loaded [:snapshot :coins-count]))
+        (throw (ex-info "Snapshot coin count mismatch" {})))
+      (println
+       (str "height=" (get-in loaded [:snapshot :base-height])
+            " coins=" (get-in loaded [:snapshot :coins-count])
+            " status=" (name (get-in loaded [:snapshot :status])))))'
+)"
+
+if [[ "$snapshot_result" != \
+  "height=$snapshot_height coins=$snapshot_coins status=assumed" ]]; then
+  echo "Core snapshot differential failed: '$snapshot_result'" >&2
+  exit 1
+fi
+
+echo "Core/kernel regtest differential match: $result; snapshot $snapshot_result"

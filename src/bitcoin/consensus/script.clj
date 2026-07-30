@@ -253,9 +253,52 @@
   (and (= 33 (count pubkey))
        (contains? #{2 3} (first pubkey))))
 
+(defn- canonical-pubkey? [pubkey]
+  (or (compressed-pubkey? pubkey)
+      (and (= 65 (count pubkey))
+           (= 4 (first pubkey)))))
+
+(defn- normalize-hybrid-pubkey [pubkey]
+  (if (and (= 65 (count pubkey))
+           (contains? #{6 7} (first pubkey))
+           (= (bit-and (first pubkey) 1)
+              (bit-and (peek pubkey) 1)))
+    (assoc (vec pubkey) 0 4)
+    pubkey))
+
+(defn- check-ecdsa-encoding! [signature-value pubkey flags sigversion]
+  (when (seq signature-value)
+    (when (and (some flags #{:dersig :low-s :strict-encoding})
+               (not (signature/strict-der? signature-value)))
+      (fail! :bitcoin.consensus/signature-der
+             "Signature is not strictly DER encoded." {}))
+    (when (and (contains? flags :low-s)
+               (not (signature/low-s? signature-value)))
+      (fail! :bitcoin.consensus/signature-high-s
+             "Signature has a non-canonical high S value." {}))
+    (when (and (contains? flags :strict-encoding)
+               (not (signature/defined-sighash-type?
+                     (peek signature-value))))
+      (fail! :bitcoin.consensus/signature-hash-type
+             "Signature uses an undefined sighash type." {})))
+  (when (and (contains? flags :strict-encoding)
+             (not (canonical-pubkey? pubkey)))
+    (fail! :bitcoin.consensus/pubkey-encoding
+           "Public key is not canonically encoded." {}))
+  (when (and (= sigversion :witness-v0)
+             (contains? flags :compressed-pubkey)
+             (not (compressed-pubkey? pubkey)))
+    (fail! :bitcoin.consensus/witness-pubkey-encoding
+           "SegWit v0 requires a compressed public key." {})))
+
 (defn- check-signature
   [{:keys [transaction input-index coin sigversion flags script
            code-separator] :as context} signature-value pubkey]
+  (when (not= sigversion :tapscript)
+    (check-ecdsa-encoding! signature-value pubkey flags sigversion))
+  (when (and (= sigversion :tapscript) (empty? pubkey))
+    (fail! :bitcoin.consensus/tapscript-pubkey
+           "Tapscript public key is empty." {}))
   (if (empty? signature-value)
     false
     (if (= sigversion :tapscript)
@@ -295,6 +338,7 @@
              (or code-separator 0xffffffff)})
            pubkey (subvec (vec signature-value) 0 64))))
       (let [hash-type (bit-and 0xff (peek signature-value))
+          pubkey (normalize-hybrid-pubkey pubkey)
           subscript (subvec (vec script) code-separator)
           script-code
           (if (= sigversion :witness-v0)
@@ -308,10 +352,7 @@
             (sighash/bip143 transaction input-index script-code
                             (:value coin) hash-type)
             (sighash/legacy transaction input-index script-code hash-type))]
-      (and (or (not (contains? flags :compressed-pubkey))
-               (not= sigversion :witness-v0)
-               (compressed-pubkey? pubkey))
-           (if (contains? flags :dersig)
+      (if (some flags #{:dersig :low-s :strict-encoding})
              (signature/verify-der
               digest signature-value
               (byte-array (map unchecked-byte pubkey))
@@ -319,7 +360,7 @@
                :defined-sighash? (contains? flags :strict-encoding)})
              (signature/verify-lax-der
               digest signature-value
-              (byte-array (map unchecked-byte pubkey)))))))))
+              (byte-array (map unchecked-byte pubkey))))))))
 
 (defn- pop-stack [stack opcode]
   (when (empty? stack)
@@ -851,6 +892,8 @@
                    (require-items! stack (inc signature-count) opcode)
                    (let [[stack signatures]
                          (take-stack-items stack signature-count)
+                         signatures (vec (reverse signatures))
+                         pubkeys (vec (reverse pubkeys))
                          [stack dummy] (pop-stack stack opcode)
                          _ (when (and (contains? (:flags context)
                                                  :null-dummy)
@@ -1175,7 +1218,8 @@
                 transaction input-index coin witness wrapped-witness
                 flags))
              (let [result (evaluate redeem-stack redeem-script context)]
-               (when (seq witness)
+               (when (and (contains? flags :witness)
+                          (seq witness))
                  (fail! :bitcoin.consensus/unexpected-witness
                         "Non-witness P2SH input carries witness data." {}))
                (final-stack! result (contains? flags :cleanstack))))))

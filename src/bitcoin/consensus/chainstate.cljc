@@ -8,6 +8,12 @@
             [bitcoin.consensus.versionbits :as versionbits]
             [kotobase.bitcoin.protocol :as header]))
 
+(defn- hex-bytes [value]
+  (mapv (fn [pair]
+          #?(:clj (Integer/parseInt (apply str pair) 16)
+             :cljs (js/parseInt (apply str pair) 16)))
+        (partition 2 value)))
+
 (def consensus-parameters
   {:mainnet {:bip34-height 227931
              :bip65-height 388381
@@ -20,6 +26,11 @@
              {:bit 2 :start-time 1619222400 :timeout 1628640000
               :min-activation-height 709632 :threshold 1815 :period 2016}
              :halving-interval 210000
+             :assume-valid-hash
+             "00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac"
+             :minimum-chainwork
+             (hex-bytes
+              "0000000000000000000000000000000000000001128750f82f4c366153a3a030")
              :script-flag-exceptions
              {"00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22"
               #{}
@@ -37,6 +48,11 @@
              {:bit 2 :start-time 1619222400 :timeout 1628640000
               :min-activation-height 0 :threshold 1512 :period 2016}
              :halving-interval 210000
+             :assume-valid-hash
+             "000000007a61e4230b28ac5cb6b5e5a0130de37ac1faf2f8987d2fa6505b67f4"
+             :minimum-chainwork
+             (hex-bytes
+              "0000000000000000000000000000000000000000000017dde1c649f3708d14b6")
              :script-flag-exceptions
              {"00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105"
               #{}}}
@@ -49,6 +65,8 @@
              :taproot-height 0
              :taproot-deployment {:always-active? true}
              :halving-interval 150
+             :assume-valid-hash nil
+             :minimum-chainwork header/zero-chainwork
              :script-flag-exceptions {}}})
 
 (def bip30-repeat-blocks
@@ -123,13 +141,15 @@
       {:network network
        :consensus (:consensus base-state)
        :active-tip hash
+       :best-header hash
        :utxo utxo-state
        :nodes {hash {:hash hash :parent nil :height 0
                      :header actual :block genesis-block
                      :chainwork chainwork :undo undo
                      :deployments
                      {:taproot (if taproot-active? :active :defined)}
-                     :active? true :block-valid? true}}}))))
+                     :active? true :header-valid? true
+                     :block-valid? true :scripts-checked? true}}}))))
 
 (defn- ancestor-nodes [state hash limit]
   (loop [hash hash remaining limit newest []]
@@ -207,6 +227,67 @@
         (= height (:height node)) node
         (< (:height node) height) nil
         :else (recur (:parent node))))))
+
+(defn- subtract-chainwork [left right]
+  (loop [index 31 result (vec (repeat 32 0)) borrow 0]
+    (if (neg? index)
+      result
+      (let [difference (- (nth left index) (nth right index) borrow)
+            borrowed? (neg? difference)]
+        (recur (dec index)
+               (assoc result index
+                      (if borrowed? (+ difference 256) difference))
+               (if borrowed? 1 0))))))
+
+(defn- multiply-chainwork [value multiplier]
+  (loop [index 31 result (vec (repeat 32 0)) carry 0]
+    (if (neg? index)
+      result
+      (let [product (+ (* (nth value index) multiplier) carry)]
+        (recur (dec index)
+               (assoc result index (mod product 256))
+               (quot product 256))))))
+
+(defn- chainwork-at-least? [actual minimum]
+  (not (header/better-chain? minimum actual)))
+
+(defn assumevalid-script-check?
+  "Return true when Script must be checked under Bitcoin Core's assumevalid
+  safety gates. All non-Script consensus checks remain mandatory."
+  [state block-hash]
+  (let [{:keys [assume-valid-hash minimum-chainwork]} (:consensus state)
+        block-node (get-in state [:nodes block-hash])
+        assumed-node (get-in state [:nodes assume-valid-hash])
+        best-node (get-in state [:nodes (:best-header state)])
+        in-assumed-chain?
+        (and assumed-node block-node
+             (= block-hash
+                (:hash
+                 (ancestor-at-height state assume-valid-hash
+                                     (:height block-node)))))
+        in-best-chain?
+        (and best-node block-node
+             (= block-hash
+                (:hash
+                 (ancestor-at-height state (:hash best-node)
+                                     (:height block-node)))))
+        sufficiently-buried?
+        (and best-node block-node
+             (let [work-distance
+                   (subtract-chainwork (:chainwork best-node)
+                                       (:chainwork block-node))
+                   two-weeks-at-tip-work
+                   (multiply-chainwork
+                    (header/header-work (get-in best-node [:header :bits]))
+                    2016)]
+               (header/better-chain? work-distance
+                                     two-weeks-at-tip-work)))]
+    (not (and assume-valid-hash
+              in-assumed-chain?
+              in-best-chain?
+              (chainwork-at-least? (:chainwork best-node)
+                                   minimum-chainwork)
+              sufficiently-buried?))))
 
 (defn- median-time-past-at-height [state height]
   (let [node (ancestor-at-height state (:active-tip state) height)]
@@ -296,7 +377,15 @@
      (fn [current-state hash]
        (let [node (get-in current-state [:nodes hash])
              height (:height node)
-             verifier (verifier-for current-state height hash verify-script)
+             _ (when-not (:block node)
+                 (codec/fail! :bitcoin.consensus/missing-block-data
+                              "Cannot activate a header without its block data."
+                              {:hash hash :height height}))
+             scripts-checked? (assumevalid-script-check? current-state hash)
+             verifier
+             (if scripts-checked?
+               (verifier-for current-state height hash verify-script)
+               (constantly true))
              csv-active? (>= height
                              (get-in current-state
                                      [:consensus :csv-height]))
@@ -319,8 +408,38 @@
              (assoc :utxo next-utxo :active-tip hash)
              (assoc-in [:nodes hash :undo] undo)
              (assoc-in [:nodes hash :active?] true)
-             (assoc-in [:nodes hash :block-valid?] true))))
+             (assoc-in [:nodes hash :block-valid?] true)
+             (assoc-in [:nodes hash :scripts-checked?]
+                       scripts-checked?))))
      (assoc detached :active-tip fork) attach)))
+
+(defn accept-header
+  "Validate and index one header without treating it as a validated block.
+  This permits headers-first synchronization while UTXO activation remains
+  strictly block-driven."
+  [state parsed-header now]
+  (let [hash (:hash-hex parsed-header)]
+    (if (contains? (:nodes state) hash)
+      state
+      (let [shell {:header parsed-header}
+            parent-node (validate-header! state shell now)
+            height (inc (:height parent-node))
+            node
+            {:hash hash :parent (:hash parent-node)
+             :height height :header parsed-header :block nil
+             :deployments
+             {:taproot (next-taproot-state state parent-node height)}
+             :chainwork
+             (header/add-chainwork
+              (:chainwork parent-node)
+              (header/header-work (:bits parsed-header)))
+             :active? false :header-valid? true
+             :block-valid? false :scripts-checked? false}
+            added (assoc-in state [:nodes hash] node)
+            best-work (get-in state [:nodes (:best-header state) :chainwork])]
+        (if (header/better-chain? (:chainwork node) best-work)
+          (assoc added :best-header hash)
+          added)))))
 
 (defn accept-block
   "Validate and add a parsed block, activating it atomically only when its
@@ -329,24 +448,44 @@
    (accept-block state parsed-block now nil))
   ([state parsed-block now verify-script]
    (let [hash (get-in parsed-block [:header :hash-hex])]
-    (if (contains? (:nodes state) hash)
+    (if (get-in state [:nodes hash :block])
       state
-      (let [parent-node (validate-header! state parsed-block now)
+      (let [existing (get-in state [:nodes hash])
+            parent-node
+            (if existing
+              (get-in state [:nodes (:parent existing)])
+              (validate-header! state parsed-block now))
             _ (validate-block-context! state parsed-block parent-node)
-            node {:hash hash :parent (:hash parent-node)
-                  :height (inc (:height parent-node))
-                  :header (:header parsed-block) :block parsed-block
-                  :deployments
-                  {:taproot
-                   (next-taproot-state
-                    state parent-node (inc (:height parent-node)))}
-                  :chainwork
-                  (header/add-chainwork
-                   (:chainwork parent-node)
-                   (header/header-work
-                    (get-in parsed-block [:header :bits])))
-                  :active? false :block-valid? false}
-            added (assoc-in state [:nodes hash] node)
+            _ (when (and existing
+                         (not= (:header existing) (:header parsed-block)))
+                (codec/fail! :bitcoin.consensus/header-block-mismatch
+                             "Block does not match its validated header."
+                             {:hash hash}))
+            node
+            (or existing
+                {:hash hash :parent (:hash parent-node)
+                 :height (inc (:height parent-node))
+                 :header (:header parsed-block)
+                 :deployments
+                 {:taproot
+                  (next-taproot-state
+                   state parent-node (inc (:height parent-node)))}
+                 :chainwork
+                 (header/add-chainwork
+                  (:chainwork parent-node)
+                  (header/header-work
+                   (get-in parsed-block [:header :bits])))
+                 :active? false :header-valid? true
+                 :block-valid? false :scripts-checked? false})
+            added
+            (cond-> (assoc-in state [:nodes hash]
+                              (assoc node :block parsed-block))
+              (or (nil? (:best-header state))
+                  (header/better-chain?
+                   (:chainwork node)
+                   (get-in state
+                           [:nodes (:best-header state) :chainwork])))
+              (assoc :best-header hash))
             active-work (get-in state [:nodes (:active-tip state)
                                        :chainwork])]
         (if (header/better-chain? (:chainwork node) active-work)

@@ -9,7 +9,7 @@
                           StandardOpenOption)
            (java.security MessageDigest)))
 
-(def format-version 1)
+(def format-version 2)
 
 (defn- sha256-hex [^bytes bytes]
   (let [digest (.digest (MessageDigest/getInstance "SHA-256") bytes)]
@@ -20,6 +20,7 @@
    :network (:network state)
    :consensus (:consensus state)
    :active-tip (:active-tip state)
+   :best-header (:best-header state)
    :utxo (:utxo state)
    :nodes (:nodes state)})
 
@@ -49,7 +50,7 @@
 (defn validate!
   "Validate structural invariants that must survive a process restart."
   [state expected-network]
-  (when-not (= format-version (:format state))
+  (when-not (contains? #{1 format-version} (:format state))
     (codec/fail! :bitcoin.consensus/unsupported-chainstate-format
                  "Unsupported chainstate snapshot format."
                  {:format (:format state)}))
@@ -57,8 +58,21 @@
     (codec/fail! :bitcoin.consensus/chainstate-network-mismatch
                  "Chainstate belongs to a different Bitcoin network."
                  {:expected expected-network :actual (:network state)}))
-  (let [path (active-path state)
-        tip (get-in state [:nodes (:active-tip state)])]
+  (let [state (cond-> state
+                (= 1 (:format state))
+                (assoc :best-header (:active-tip state)))
+        path (active-path state)
+        tip (get-in state [:nodes (:active-tip state)])
+        best-header (get-in state [:nodes (:best-header state)])]
+    (when-not best-header
+      (codec/fail! :bitcoin.consensus/corrupt-chainstate
+                   "Best header references a missing node."
+                   {:best-header (:best-header state)}))
+    (when (pos? (compare (:chainwork tip) (:chainwork best-header)))
+      (codec/fail! :bitcoin.consensus/corrupt-chainstate
+                   "Best header has less work than the active tip."
+                   {:active-tip (:active-tip state)
+                    :best-header (:best-header state)}))
     (when-not (= (:height tip) (get-in state [:utxo :height]))
       (codec/fail! :bitcoin.consensus/corrupt-chainstate
                    "UTXO height differs from the active tip height."
