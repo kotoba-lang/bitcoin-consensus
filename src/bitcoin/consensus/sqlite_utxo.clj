@@ -693,3 +693,11 @@
               next (reduce-fn acc entry)]
           (if (reduced? next) @next (recur next)))
         acc))))
+
+(defn hash-serialized
+  "Recompute Core HASH_SERIALIZED over the ordered disk UTXO cursor without
+  materializing the set in JVM memory."
+  [backend]
+  (assumeutxo/hash-serialized-reduce
+   (fn [reduce-fn initial]
+     (entries backend reduce-fn initial))))

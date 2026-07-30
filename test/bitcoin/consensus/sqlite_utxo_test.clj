@@ -301,3 +301,40 @@
         (is (= (seq host-bytes) (seq (sqlite/host-state backend))))
         (is (= base-hash (:tip (sqlite/status backend))))
         (is (= coin-a (sqlite/lookup backend [txid-a 0])))))))
+
+(deftest disk-hash-serialized-matches-in-memory-ordering
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            txid-b (vec (reverse (range 32)))
+            coin-b {:value 2000 :script-pubkey [0 20 1 2 3 4 5 6 7 8 9
+                                                10 11 12 13 14 15 16 17
+                                                18 19 20]
+                    :height 0 :coinbase? false}
+            coins {[txid-b 3] coin-b [txid-a 0] coin-a}
+            base-hash (apply str (repeat 64 "5"))
+            snapshot
+            (snapshot-bytes
+             base-hash
+             ;; The fixture serializer accepts one entry, so use the overlay
+             ;; commit path to exercise multiple SQL cursor rows.
+             [[txid-a 0] coin-a])
+            commitment
+            (assumeutxo/hash-serialized {[txid-a 0] coin-a})]
+        (sqlite/import-snapshot!
+         backend snapshot (constantly base-hash)
+         {:checkpoints
+          {2 {:blockhash base-hash
+              :hash-serialized commitment :chain-tx-count 3}}})
+        (let [view (sqlite/begin backend)
+              updated (utxo/coin-assoc view [txid-b 3] coin-b)]
+          (sqlite/commit-transition!
+           updated
+           {:expected-tip base-hash :expected-height 2
+            :new-tip "next" :new-height 3 :detach []
+            :attach [{:block-hash "next" :parent-hash base-hash
+                      :height 3 :previous-height 2
+                      :undo {:height 2 :spent {}
+                             :created #{[txid-b 3]}}}]}))
+        (is (= (assumeutxo/hash-serialized coins)
+               (sqlite/hash-serialized backend)))))))

@@ -255,17 +255,48 @@
           (codec/compact-size (count (:script-pubkey coin)))
           (:script-pubkey coin)))
 
-(defn hash-serialized
-  "Compute Bitcoin Core HASH_SERIALIZED (hash_serialized_3) for a UTXO map."
-  [coins]
+(defn hash-serialized-reduce
+  "Compute HASH_SERIALIZED from an ordered, constant-memory reducer.
+
+  `reduce-entries` receives a reducing function and initial value. Entries must
+  be ordered by natural txid bytes and then vout, matching Core's cursor."
+  [reduce-entries]
   (let [first-hash (MessageDigest/getInstance "SHA-256")]
-    (doseq [[[txid vout] coin]
-            (sort-by (fn [[[txid vout] _]] [txid vout])
-                     (utxo/coin-entries coins))]
-      (update-digest! first-hash (coin-hash-bytes txid vout coin)))
+    (reduce-entries
+     (fn [count [[txid vout] coin]]
+       (update-digest! first-hash (coin-hash-bytes txid vout coin))
+       (inc count))
+     0)
     (displayed-hash
      (.digest (MessageDigest/getInstance "SHA-256")
               (.digest first-hash)))))
+
+(defn hash-serialized
+  "Compute Bitcoin Core HASH_SERIALIZED (hash_serialized_3) for a UTXO map."
+  [coins]
+  (hash-serialized-reduce
+   (fn [reduce-fn initial]
+     (reduce
+      reduce-fn initial
+      (sort-by (fn [[[txid vout] _]] [txid vout])
+               (utxo/coin-entries coins))))))
+
+(defn validate-background-commitment
+  "Promote an assumed state from independently validated disk evidence."
+  [loaded actual-height actual-tip actual-hash]
+  (let [{:keys [base-height base-blockhash]} (:snapshot loaded)
+        expected-hash (get-in loaded [:snapshot :hash-serialized])]
+    (when-not (and (= base-height actual-height)
+                   (= base-blockhash actual-tip))
+      (codec/fail! :bitcoin.consensus/snapshot-background-base
+                   "Background validation has not reached the snapshot base."
+                   {:expected-height base-height :actual-height actual-height
+                    :expected-hash base-blockhash :actual-hash actual-tip}))
+    (when-not (= expected-hash actual-hash)
+      (codec/fail! :bitcoin.consensus/snapshot-background-mismatch
+                   "Background-validated UTXO set differs from the snapshot."
+                   {:expected expected-hash :actual actual-hash}))
+    (assoc-in loaded [:snapshot :status] :validated)))
 
 (defn- checkpoint-for! [network base-hash supplied]
   (let [available (or supplied (get checkpoints network))
@@ -403,23 +434,11 @@
   "Promote an assumed snapshot only after an independently fully validated
   chainstate reaches the same base and recomputes the exact commitment."
   [loaded fully-validated]
-  (let [{:keys [base-height base-blockhash]}
-        (:snapshot loaded)
-        expected-hash (get-in loaded [:snapshot :hash-serialized])
-        actual-height (get-in fully-validated [:utxo :height])
-        actual-tip (:active-tip fully-validated)]
-    (when-not (and (= base-height actual-height)
-                   (= base-blockhash actual-tip))
-      (codec/fail! :bitcoin.consensus/snapshot-background-base
-                   "Background validation has not reached the snapshot base."
-                   {:expected-height base-height :actual-height actual-height
-                    :expected-hash base-blockhash :actual-hash actual-tip}))
-    (let [actual (hash-serialized (get-in fully-validated [:utxo :coins]))]
-      (when-not (= expected-hash actual)
-        (codec/fail! :bitcoin.consensus/snapshot-background-mismatch
-                     "Background-validated UTXO set differs from the snapshot."
-                     {:expected expected-hash :actual actual}))
-      (assoc-in loaded [:snapshot :status] :validated))))
+  (validate-background-commitment
+   loaded
+   (get-in fully-validated [:utxo :height])
+   (:active-tip fully-validated)
+   (hash-serialized (get-in fully-validated [:utxo :coins]))))
 
 (defn- ancestor-hash-at-height [state tip height]
   (loop [hash tip]

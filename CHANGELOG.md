@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2 — 2026-07-30
+
+- Recompute Bitcoin Core HASH_SERIALIZED directly from the ordered SQLite UTXO
+  cursor in constant JVM memory.
+- Validate AssumeUTXO background evidence from an independently persisted
+  height, tip, and UTXO commitment without materializing the coin set.
+
 ## 0.7.1 — 2026-07-30
 
 - Persist AssumeUTXO trust/status metadata in checksummed chainstate so a
