@@ -460,6 +460,33 @@
   [backend]
   (blob-header-nodes backend))
 
+(defn header-node
+  "Load one normalized header node by display-order hash.
+
+  This is the bounded lookup primitive used by lazy disk-backed chainstate
+  hosts; unlike `header-nodes`, it never scans or materializes the index."
+  [backend hash]
+  (when-not (string? hash)
+    (fail! :bitcoin.consensus/sqlite-header-hash
+           "Normalized header lookup requires a display-order hash."
+           {:hash hash}))
+  (with-open [connection (connection backend)]
+    (first-row
+     connection
+     "SELECT node FROM consensus_header_nodes WHERE hash = ?"
+     [hash]
+     #(decode-header-node (.getBytes ^ResultSet % 1)))))
+
+(defn header-node-count
+  "Return the normalized header row count without decoding header values."
+  [backend]
+  (with-open [connection (connection backend)]
+    (first-row
+     connection
+     "SELECT count(*) FROM consensus_header_nodes"
+     []
+     #(.getLong ^ResultSet % 1))))
+
 (defn header-integrity-check!
   "Recompute every normalized header hash, parent link, height, and chainwork.
 

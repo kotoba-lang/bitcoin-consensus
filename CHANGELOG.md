@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0 — 2026-07-30
+
+- Add bounded normalized-header point lookup and row-count primitives so
+  disk-backed hosts can use lazy cached indexes without decoding the complete
+  mainnet header graph during every process restart.
+
 ## 0.9.0 — 2026-07-30
 
 - Add schema-v4 normalized, fixed-length header-node storage and atomically

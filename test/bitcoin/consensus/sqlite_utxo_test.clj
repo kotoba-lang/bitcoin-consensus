@@ -150,6 +150,9 @@
             bytes (.getBytes "compact-host-state")]
         (sqlite/save-host-and-headers! backend nil -1 bytes [node])
         (is (= {(:hash node) node} (sqlite/header-nodes backend)))
+        (is (= node (sqlite/header-node backend (:hash node))))
+        (is (nil? (sqlite/header-node backend (apply str (repeat 64 "0")))))
+        (is (= 1 (sqlite/header-node-count backend)))
         (is (= (seq bytes) (seq (sqlite/host-state backend))))
         (let [updated (assoc node :active? false :block-valid? false)]
           (sqlite/save-host-and-headers! backend nil -1 bytes [updated])
