@@ -9,6 +9,7 @@
 
 (def txid-a (vec (repeat 32 1)))
 (def txid-b (vec (repeat 32 2)))
+(def txid-c (vec (repeat 32 3)))
 (def coin-a {:value 5000 :script-pubkey [0x51]
              :height 1 :coinbase? false})
 (def coin-b {:value 3000 :script-pubkey [0x00 0x14 1 2 3]
@@ -169,6 +170,59 @@
           (is (= coin-b (sqlite/lookup backend [txid-a 0])))
           (sqlite/disconnect-tip! backend "bip30-repeat")
           (is (= coin-a (sqlite/lookup backend [txid-a 0]))))))))
+
+(deftest most-work-reorganization-and-host-state-commit-together
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            genesis-view (-> (sqlite/begin backend)
+                             (utxo/-coin-assoc [txid-a 0] coin-a))]
+        (sqlite/commit-block!
+         genesis-view
+         {:block-hash "genesis" :parent-hash nil
+          :height 0 :previous-height -1
+          :undo {:height -1 :spent {} :created #{[txid-a 0]}}})
+        (let [old-view (-> (sqlite/begin backend)
+                           (utxo/-coin-dissoc [txid-a 0])
+                           (utxo/-coin-assoc [txid-b 0] coin-b))
+              old-undo {:height 0 :spent {[txid-a 0] coin-a}
+                        :created #{[txid-b 0]}}]
+          (sqlite/commit-block!
+           old-view
+           {:block-hash "old" :parent-hash "genesis"
+            :height 1 :previous-height 0 :undo old-undo})
+          (let [view (sqlite/begin backend)
+                detached
+                (utxo/disconnect-block {:height 1 :coins view} old-undo)
+                alternate-block
+                {:transactions
+                 [{:txid-natural txid-c
+                   :inputs [{:txid-natural (vec (repeat 32 0))
+                             :vout 0xffffffff :script-sig [1 1]
+                             :sequence 0xffffffff}]
+                   :outputs [{:value 1000 :script-pubkey [0x51]}]}]}
+                {next-state :state alternate-undo :undo}
+                (utxo/apply-block-with-undo
+                 detached alternate-block 1 (constantly true)
+                 {:halving-interval 150})]
+            (is (= {:height 1 :tip "alternate" :coin-count 2
+                    :detached 1 :attached 1}
+                   (sqlite/commit-transition!
+                    (:coins next-state)
+                    {:expected-tip "old" :expected-height 1
+                     :new-tip "alternate" :new-height 1
+                     :detach ["old"]
+                     :attach
+                     [{:block-hash "alternate" :parent-hash "genesis"
+                       :height 1 :previous-height 0
+                       :undo alternate-undo}]
+                     :host-state-bytes (byte-array [1 2 3])})))
+            (is (= coin-a (sqlite/lookup backend [txid-a 0])))
+            (is (nil? (sqlite/lookup backend [txid-b 0])))
+            (is (= 1000 (:value (sqlite/lookup backend [txid-c 0]))))
+            (is (nil? (sqlite/undo backend "old")))
+            (is (= 0 (:height (sqlite/undo backend "alternate"))))
+            (is (= [1 2 3] (vec (sqlite/host-state backend))))))))))
 
 (deftest consensus-transition-validates-directly-on-disk-overlay
   (with-database

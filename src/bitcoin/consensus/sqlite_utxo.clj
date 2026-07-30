@@ -12,7 +12,7 @@
            [javax.sql DataSource]
            [org.sqlite SQLiteDataSource]))
 
-(def schema-version 1)
+(def schema-version 2)
 (def ^:private deleted ::deleted)
 
 (def ^:private schema
@@ -49,7 +49,12 @@
       PRIMARY KEY(block_hash, sequence),
       FOREIGN KEY(block_hash) REFERENCES consensus_undo_blocks(block_hash)
         ON DELETE CASCADE
-    ) WITHOUT ROWID"])
+    ) WITHOUT ROWID"
+   "CREATE TABLE IF NOT EXISTS consensus_host_state (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      bytes BLOB NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT(unixepoch())
+    )"])
 
 (defn- fail! [type message data]
   (codec/fail! type message data))
@@ -185,10 +190,14 @@
       (let [stored-version (meta-value connection "schema_version")
             stored-network (meta-value connection "network")]
         (when (and stored-version
-                   (not= schema-version (parse-long stored-version)))
+                   (not (contains? #{1 schema-version}
+                                   (parse-long stored-version))))
           (fail! :bitcoin.consensus/sqlite-schema
                  "Unsupported SQLite UTXO schema."
                  {:expected schema-version :actual stored-version}))
+        (when (= "1" stored-version)
+          (execute-statement!
+           connection "DROP INDEX IF EXISTS consensus_undo_outpoint"))
         (when (and stored-network (not= (name network) stored-network))
           (fail! :bitcoin.consensus/sqlite-network-mismatch
                  "SQLite UTXO database belongs to another network."
@@ -278,6 +287,130 @@
             "DELETE FROM consensus_coins WHERE txid = ? AND vout = ?"
             [(txid-bytes txid) (long vout)]))
 
+(defn- insert-undo!
+  [connection {:keys [block-hash parent-hash height previous-height undo]}]
+  (execute!
+   connection
+   "INSERT INTO consensus_undo_blocks
+    (block_hash, parent_hash, height, previous_height)
+    VALUES (?, ?, ?, ?)"
+   [block-hash parent-hash height previous-height])
+  (doseq [[sequence [kind key coin]]
+          (map-indexed
+           vector
+           (concat
+            (map (fn [[key coin]] [0 key coin]) (:spent undo))
+            (map (fn [key] [1 key nil]) (:created undo))))]
+    (let [[txid vout] key]
+      (execute!
+       connection
+       "INSERT INTO consensus_undo
+        (block_hash, sequence, kind, txid, vout, value, script,
+         height, coinbase)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+       [block-hash sequence kind (txid-bytes txid) (long vout)
+        (:value coin)
+        (when coin
+          (byte-array (map unchecked-byte (:script-pubkey coin))))
+        (:height coin)
+        (when coin (if (:coinbase? coin) 1 0))]))))
+
+(defn- write-host-state! [connection bytes]
+  (when-not (bytes? bytes)
+    (fail! :bitcoin.consensus/sqlite-host-state
+           "Atomic host state must be a byte array." {}))
+  (execute!
+   connection
+   "INSERT INTO consensus_host_state(id, bytes) VALUES (1, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      bytes=excluded.bytes, updated_at=unixepoch()"
+   [bytes]))
+
+(defn host-state
+  "Return the atomically committed host-state bytes, if present."
+  [backend]
+  (with-open [connection (connection backend)]
+    (first-row connection
+               "SELECT bytes FROM consensus_host_state WHERE id = 1"
+               [] #(.getBytes ^ResultSet % 1))))
+
+(defn undo
+  "Read one durable active-chain undo journal."
+  [backend block-hash]
+  (with-open [connection (connection backend)]
+    (let [previous-height
+          (first-row
+           connection
+           "SELECT previous_height FROM consensus_undo_blocks
+              WHERE block_hash = ?"
+           [block-hash] #(.getLong ^ResultSet % 1))
+          rows
+          (with-open [statement
+                      (bind!
+                       (.prepareStatement
+                        connection
+                        "SELECT kind, txid, vout, value, script, height,
+                                coinbase
+                           FROM consensus_undo WHERE block_hash = ?
+                           ORDER BY sequence")
+                       [block-hash])
+                      result (.executeQuery statement)]
+            (loop [values []]
+              (if (.next result)
+                (recur
+                 (conj
+                  values
+                  {:kind (.getInt result 1)
+                   :key [(bytes-vector (.getBytes result 2))
+                         (.getLong result 3)]
+                   :coin
+                   (when (zero? (.getInt result 1))
+                     {:value (.getLong result 4)
+                      :script-pubkey (bytes-vector (.getBytes result 5))
+                      :height (.getLong result 6)
+                      :coinbase? (not (zero? (.getInt result 7)))})}))
+                values)))]
+      (when (some? previous-height)
+        {:height previous-height
+         :spent (into {}
+                      (keep #(when (zero? (:kind %))
+                               [(:key %) (:coin %)]))
+                      rows)
+         :created (into #{}
+                        (keep #(when (= 1 (:kind %)) (:key %)))
+                        rows)}))))
+
+(defn- apply-changes! [connection changes]
+  (doseq [[key value] changes]
+    (if (= deleted value)
+      (delete-coin! connection key)
+      (insert-coin! connection key value))))
+
+(defn save-host-state!
+  "Atomically update host metadata without changing the UTXO tip."
+  [backend expected-tip expected-height bytes]
+  (with-open [connection (connection backend)]
+    (let [auto-commit (.getAutoCommit connection)]
+      (try
+        (.setAutoCommit connection false)
+        (let [actual-tip (meta-value connection "tip")
+              actual-height (parse-long (meta-value connection "height"))]
+          (when-not (and (= expected-tip actual-tip)
+                         (= expected-height actual-height))
+            (fail! :bitcoin.consensus/sqlite-stale-tip
+                   "Refusing to save host state over another UTXO tip."
+                   {:expected-tip expected-tip :actual-tip actual-tip
+                    :expected-height expected-height
+                    :actual-height actual-height}))
+          (write-host-state! connection bytes)
+          (.commit connection)
+          true)
+        (catch Throwable error
+          (.rollback connection)
+          (throw error))
+        (finally
+          (.setAutoCommit connection auto-commit))))))
+
 (defn import-snapshot!
   "Stream an authenticated Core v2 AssumeUTXO snapshot directly into SQLite.
   No Clojure map proportional to the UTXO set is created. Authentication
@@ -338,42 +471,107 @@
                  "SQLite UTXO tip changed during validation."
                  {:expected-height previous-height :actual-height actual-height
                   :expected-tip parent-hash :actual-tip actual-tip}))
-        (execute!
+        (insert-undo!
          connection
-         "INSERT INTO consensus_undo_blocks
-          (block_hash, parent_hash, height, previous_height)
-          VALUES (?, ?, ?, ?)"
-         [block-hash parent-hash height previous-height])
-        (doseq [[sequence [kind key coin]]
-                (map-indexed
-                 vector
-                 (concat
-                  (map (fn [[key coin]] [0 key coin]) (:spent undo))
-                  (map (fn [key] [1 key nil]) (:created undo))))]
-          (let [[txid vout] key]
-            (execute!
-             connection
-             "INSERT INTO consensus_undo
-              (block_hash, sequence, kind, txid, vout, value, script,
-               height, coinbase)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-             [block-hash sequence kind (txid-bytes txid) (long vout)
-              (:value coin)
-              (when coin (byte-array
-                          (map unchecked-byte (:script-pubkey coin))))
-              (:height coin)
-              (when coin (if (:coinbase? coin) 1 0))])))
+         {:block-hash block-hash :parent-hash parent-hash
+          :height height :previous-height previous-height :undo undo})
         (let [next-count (utxo/coin-count view)]
-          (doseq [[key value] (:changes view)]
-            (if (= deleted value)
-              (delete-coin! connection key)
-              (insert-coin! connection key value)))
+          (apply-changes! connection (:changes view))
           (put-meta! connection "height" height)
           (put-meta! connection "tip" block-hash)
           (put-meta! connection "coin_count" next-count)
           (.commit connection)
           (reset! (:closed? view) true)
           {:height height :tip block-hash :coin-count next-count}))
+      (catch Throwable error
+        (.rollback connection)
+        (reset! (:closed? view) true)
+        (throw error))
+      (finally
+        (.close connection)))))
+
+(defn commit-transition!
+  "Atomically commit a most-work reorganization and checksummed host state.
+
+  `detach` is ordered old tip toward the fork. `attach` is ordered fork child
+  toward the new tip and each entry contains block/parent hashes, heights, and
+  the freshly validated undo delta."
+  [^CoinOverlay view
+   {:keys [expected-tip expected-height new-tip new-height
+           detach attach host-state-bytes]}]
+  (let [^Connection connection (:connection view)]
+    (when @(:closed? view)
+      (fail! :bitcoin.consensus/closed-utxo-view
+             "UTXO validation view is already closed." {}))
+    (try
+      (let [actual-tip (meta-value connection "tip")
+            actual-height (parse-long (meta-value connection "height"))]
+        (when-not (and (= expected-tip actual-tip)
+                       (= expected-height actual-height))
+          (fail! :bitcoin.consensus/sqlite-stale-tip
+                 "SQLite UTXO tip changed during reorganization."
+                 {:expected-tip expected-tip :actual-tip actual-tip
+                  :expected-height expected-height
+                  :actual-height actual-height}))
+        (let [[fork-tip fork-height]
+              (reduce
+               (fn [[current-tip current-height] block-hash]
+                 (when-not (= current-tip block-hash)
+                   (fail! :bitcoin.consensus/sqlite-reorg-order
+                          "Detached blocks are not ordered from the tip."
+                          {:expected current-tip :actual block-hash}))
+                 (let [row
+                       (first-row
+                        connection
+                        "SELECT parent_hash, height, previous_height
+                           FROM consensus_undo_blocks
+                          WHERE block_hash = ?"
+                        [block-hash]
+                        (fn [^ResultSet result]
+                          {:parent (.getString result 1)
+                           :height (.getLong result 2)
+                           :previous-height (.getLong result 3)}))]
+                   (when-not (and row (= current-height (:height row)))
+                     (fail! :bitcoin.consensus/missing-undo
+                            "Detached block lacks matching durable undo."
+                            {:hash block-hash :height current-height}))
+                   (execute!
+                    connection
+                    "DELETE FROM consensus_undo_blocks WHERE block_hash = ?"
+                    [block-hash])
+                   [(:parent row) (:previous-height row)]))
+               [actual-tip actual-height] detach)
+              [result-tip result-height]
+              (reduce
+               (fn [[current-tip current-height] entry]
+                 (when-not (and (= current-tip (:parent-hash entry))
+                                (= (:height entry) (inc current-height))
+                                (= (:previous-height entry) current-height))
+                   (fail! :bitcoin.consensus/sqlite-reorg-order
+                          "Attached blocks do not extend the reorganization fork."
+                          {:tip current-tip :height current-height
+                           :entry (dissoc entry :undo)}))
+                 (insert-undo! connection entry)
+                 [(:block-hash entry) (:height entry)])
+               [fork-tip fork-height] attach)
+              next-count (utxo/coin-count view)]
+          (when-not (and (= new-tip result-tip)
+                         (= new-height result-height))
+            (fail! :bitcoin.consensus/sqlite-reorg-tip
+                   "Reorganization result differs from the selected tip."
+                   {:expected-tip new-tip :actual-tip result-tip
+                    :expected-height new-height
+                    :actual-height result-height}))
+          (apply-changes! connection (:changes view))
+          (put-meta! connection "height" new-height)
+          (put-meta! connection "tip" new-tip)
+          (put-meta! connection "coin_count" next-count)
+          (when host-state-bytes
+            (write-host-state! connection host-state-bytes))
+          (.commit connection)
+          (reset! (:closed? view) true)
+          {:height new-height :tip new-tip :coin-count next-count
+           :detached (count detach) :attached (count attach)}))
       (catch Throwable error
         (.rollback connection)
         (reset! (:closed? view) true)

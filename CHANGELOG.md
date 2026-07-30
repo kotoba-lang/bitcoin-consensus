@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 — 2026-07-30
+
+- Add Bitcoin Core v31.1 testnet4 consensus parameters, BIP94 header
+  retargeting, genesis validation, and pinned AssumeUTXO/assumevalid anchors.
+- Add default signet parameters and full BIP325 block-challenge verification
+  through the in-process Script VM, verified against a live Core signet block.
+- Upgrade the SQLite schema with atomic checksummed host-state persistence,
+  durable undo lookup, schema-v1 migration, and all-or-nothing multi-block
+  most-work reorganization commits.
+- Allow disk-backed chainstate hosts to resolve pruned in-memory undo from the
+  authenticated SQLite journal.
+
 ## 0.6.1 — 2026-07-30
 
 - Activate witness and Taproot Script flags only at their buried or

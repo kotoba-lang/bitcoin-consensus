@@ -3,8 +3,8 @@
  {org.clojure/clojure {:mvn/version "1.12.5"}
   io.github.kotoba-lang/org-bitcoin-p2p
   {:git/url "https://github.com/kotoba-lang/org-bitcoin-p2p.git"
-   :git/tag "v0.3.0"
-   :git/sha "397e538f14f16fa4de6d068caf1b28ee0622ee92"}
+   :git/tag "v0.4.0"
+   :git/sha "f4d9e710cab52ce5e14e9f441fbc17a273047c68"}
   io.github.kotoba-lang/sha256d
   {:git/url "https://github.com/kotoba-lang/sha256d.git"
    :git/sha "5fd4e64d0fc5a616b798edbca7327da33c78eb02"}

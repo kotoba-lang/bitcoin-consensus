@@ -3,6 +3,7 @@
   (:require [bitcoin.consensus.block :as block]
             [bitcoin.consensus.codec :as codec]
             #?(:clj [bitcoin.consensus.script :as script])
+            #?(:clj [bitcoin.consensus.signet :as signet])
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.consensus.versionbits :as versionbits]
@@ -56,6 +57,37 @@
              :script-flag-exceptions
              {"00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105"
               #{}}}
+   :testnet4 {:bip34-height 1
+              :bip65-height 1
+              :bip66-height 1
+              :csv-height 1
+              :bip113-height 1
+              :segwit-height 1
+              :taproot-height 1
+              :taproot-deployment {:always-active? true}
+              :halving-interval 210000
+              :assume-valid-hash
+              "0000000002368b1e4ee27e2e85676ae6f9f9e69579b29093e9a82c170bf7cf8a"
+              :minimum-chainwork
+              (hex-bytes
+               "0000000000000000000000000000000000000000000009a0fe15d0177d086304")
+              :script-flag-exceptions {}}
+   :signet {:bip34-height 1
+            :bip65-height 1
+            :bip66-height 1
+            :csv-height 1
+            :bip113-height 1
+            :segwit-height 1
+            :taproot-height 1
+            :taproot-deployment {:always-active? true}
+            :halving-interval 210000
+            :signet? true
+            :assume-valid-hash
+            "00000008414aab61092ef93f1aacc54cf9e9f16af29ddad493b908a01ff5c329"
+            :minimum-chainwork
+            (hex-bytes
+             "00000000000000000000000000000000000000000000000000000b463ea0a4b8")
+            :script-flag-exceptions {}}
    :regtest {:bip34-height 1
              :bip65-height 1
              :bip66-height 1
@@ -343,6 +375,9 @@
         (if (>= height bip113-height)
           (median-time-past state (:hash parent-node))
           (get-in parsed-block [:header :timestamp]))]
+    #?(:clj
+       (when (get-in state [:consensus :signet?])
+         (signet/validate! parsed-block)))
     (when (>= height bip34-height)
       (validate-coinbase-height! parsed-block height))
     (doseq [value (:transactions parsed-block)]
@@ -373,7 +408,7 @@
       result
       (recur (get-in state [:nodes hash :parent]) (conj result hash)))))
 
-(defn- activate-tip [state candidate verify-script]
+(defn- activate-tip [state candidate verify-script options]
   (let [current (:active-tip state)
         fork (common-ancestor state current candidate)
         detach (path-to-ancestor state current fork)
@@ -381,7 +416,10 @@
         detached
         (reduce
          (fn [current-state hash]
-           (let [undo (get-in current-state [:nodes hash :undo])]
+           (let [undo
+                 (or (get-in current-state [:nodes hash :undo])
+                     (when-let [undo-fn (:undo-fn options)]
+                       (undo-fn hash)))]
              (when-not undo
                (codec/fail! :bitcoin.consensus/missing-undo
                             "Active block is missing undo data."
@@ -462,8 +500,10 @@
   "Validate and add a parsed block, activating it atomically only when its
   cumulative work exceeds the current active tip."
   ([state parsed-block now]
-   (accept-block state parsed-block now nil))
+   (accept-block state parsed-block now nil {}))
   ([state parsed-block now verify-script]
+   (accept-block state parsed-block now verify-script {}))
+  ([state parsed-block now verify-script options]
    (let [hash (get-in parsed-block [:header :hash-hex])]
     (if (get-in state [:nodes hash :block])
       state
@@ -506,7 +546,7 @@
             active-work (get-in state [:nodes (:active-tip state)
                                        :chainwork])]
         (if (header/better-chain? (:chainwork node) active-work)
-          (activate-tip added hash verify-script)
+          (activate-tip added hash verify-script options)
           added))))))
 
 (defn active-height [state]

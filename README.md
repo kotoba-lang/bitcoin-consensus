@@ -14,6 +14,8 @@ This repository is separate from the permanently read-only
 - BIP141 witness commitment validation
 - block coinbase, duplicate transaction, and 4,000,000 weight checks
 - contextual header difficulty, PoW, linkage, MTP, future-time, and chainwork
+- mainnet, testnet3, testnet4/BIP94, default signet/BIP325, and regtest
+  consensus parameters and genesis trust anchors
 - legacy, P2SH, SegWit v0, and Taproot key/script-path Script verification
 - legacy, BIP143, and BIP341/342 sighash plus ECDSA/BIP340 Schnorr verification
 - historical lax-DER/BIP66, CLTV, CSV/BIP68, BIP147, and BIP30 exceptions
@@ -23,7 +25,8 @@ This repository is separate from the permanently read-only
 - atomic UTXO application, coinbase maturity, per-network subsidy, fees, and undo
 - network-bound SQLite UTXO storage with WAL/FULL durability, ordered outpoints,
   atomic block delta + undo commits, stale-tip rejection, restart-safe
-  disconnect, integrity checks, and O(touched outpoints) transition memory
+  disconnect, multi-block reorganization + host-state commits, integrity
+  checks, schema migration, and O(touched outpoints) transition memory
 - provably unspendable output pruning and signed transaction-version handling
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data

@@ -4,6 +4,7 @@
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sighash :as sighash]
+            [bitcoin.consensus.signet :as signet]
             [bitcoin.consensus.script :as script]
             [bitcoin.consensus.storage :as storage]
             [bitcoin.consensus.sync :as sync]
@@ -26,8 +27,78 @@
 (def block-one-hex
   "010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e362990101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0704ffff001d0104ffffffff0100f2052a0100000043410496b538e853519c726a2c91e61ec11600ae1390813a627c66fb8be7947be63c52da7589379515d4e0a604f8141781e62294721166bf621e73a82cbf2342c858eeac00000000")
 
+(def signet-block-one-hex
+  "00000020f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000f575c83235984e7dc4afc1f30944c170462e84437ab6f2d52e16878a79e4678bd1914d5fae77031eccf4070001010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff025151feffffff0200f2052a010000001600149243f727dd5343293eb83174324019ec16c2630f0000000000000000776a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf94c4fecc7daa2490047304402205e423a8754336ca99dbe16509b877ef1bf98d008836c725005b3c787c41ebe46022047246e4467ad7cc7f1ad98662afcaf14c115e0095a227c7b05c5182591c23e7e01000120000000000000000000000000000000000000000000000000000000000000000000000000")
+
 (def regtest-genesis-block-hex
   (str header/regtest-genesis-header-hex (subs genesis-block-hex 160)))
+
+(def testnet4-genesis-block
+  (let [message
+        (mapv int
+              "03/May/2024 000000000000000000001ebd58c244970b3aa9d783bb001011fbe8ea8e98e00e")
+        coinbase
+        (transaction/parse
+         (transaction/serialize
+          {:version 1
+           :inputs
+           [{:txid-natural (vec (repeat 32 0))
+             :vout 0xffffffff
+             :script-sig
+             (vec (concat [4 0xff 0xff 0x00 0x1d 1 4
+                           0x4c (count message)]
+                          message))
+             :sequence 0xffffffff}]
+           :outputs
+           [{:value 5000000000
+             :script-pubkey
+             (vec (concat [0x21] (repeat 33 0) [0xac]))}]
+           :witnesses nil :locktime 0 :segwit? false}))]
+    (block/parse
+     (vec
+      (concat
+       (header/encode-block-header
+        {:version 1
+         :prev-block (vec (repeat 32 0))
+         :merkle-root (:txid-natural coinbase)
+         :timestamp 1714777860
+         :bits 0x1d00ffff
+         :nonce 393743547})
+       [1] (:raw coinbase))))))
+
+(def signet-genesis-block
+  (block/parse
+   (mapv #(Integer/parseInt (apply str %) 16)
+         (partition
+          2
+          (str header/signet-genesis-header-hex
+               (subs genesis-block-hex 160))))))
+
+(defn trivial-signet-block []
+  (let [reserved (vec (repeat 32 0))
+        commitment
+        (vec
+         (sha256d/sha256d-bytes
+          (vec (concat (vec (repeat 32 0)) reserved))))
+        coinbase
+        (transaction/parse
+         (transaction/serialize
+          {:version 1
+           :inputs [{:txid-natural (vec (repeat 32 0))
+                     :vout 0xffffffff :script-sig [1 1]
+                     :sequence 0xffffffff}]
+           :outputs
+           [{:value 5000000000
+             :script-pubkey
+             (vec (concat block/witness-commitment-prefix commitment))}]
+           :witnesses [[reserved]] :locktime 0 :segwit? true}))
+        header-value
+        (header/decode-block-header
+         (header/encode-block-header
+          {:version 1 :prev-block (vec (repeat 32 1))
+           :merkle-root (:txid-natural coinbase)
+           :timestamp 1600000000 :bits 0x1e0377ae :nonce 0}))]
+    {:header header-value :transactions [coinbase]}))
 
 (defn hex->bytes [value]
   (mapv #(Integer/parseInt (apply str %) 16) (partition 2 value)))
@@ -623,6 +694,31 @@
     (is (true? (get-in connected
                        [:nodes (:active-tip connected) :block-valid?])))
     (is (= 2 (count (get-in connected [:utxo :coins]))))))
+
+(deftest testnet4-genesis-and-always-active-deployments-are-supported
+  (let [state (chainstate/initialize :testnet4 testnet4-genesis-block)]
+    (is (= "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
+           (:active-tip state)))
+    (is (= :active
+           (get-in state [:nodes (:active-tip state)
+                          :deployments :taproot])))
+    (is (= #{:p2sh :witness :taproot :dersig :cltv :csv :null-dummy}
+           (chainstate/script-flags
+            (:testnet4 chainstate/consensus-parameters) 1 "ordinary")))))
+
+(deftest signet-genesis-and-bip325-challenge-are-validated
+  (let [state (chainstate/initialize :signet signet-genesis-block)
+        block-one (block/parse (hex->bytes signet-block-one-hex))
+        connected (chainstate/accept-block state block-one 2000000000)
+        block (trivial-signet-block)]
+    (is (= "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
+           (:active-tip state)))
+    (is (true? (signet/validate! block [0x51])))
+    (is (= 1 (chainstate/active-height connected)))
+    (is (= (get-in block-one [:header :hash-hex])
+           (:active-tip connected)))
+    (is (= :bitcoin.consensus/bad-signet-solution
+           (error-type #(signet/validate! block signet/default-challenge))))))
 
 (deftest headers-first-sync-never-activates-unreceived-block-data
   (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
