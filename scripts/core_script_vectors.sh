@@ -20,7 +20,7 @@ if [[ "$actual_sha256" != "$vector_sha256" ]]; then
 fi
 
 result="$(clojure -M:core-vectors "$vector_file")"
-expected="{:vectors 1222, :passed 1033, :skipped 189, :failed 0}"
+expected="{:vectors 1222, :passed 1222, :skipped 0, :failed 0}"
 if [[ "$result" != "$expected" ]]; then
   echo "Bitcoin Core Script vector coverage changed: $result" >&2
   exit 1

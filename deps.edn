@@ -10,7 +10,8 @@
    :git/sha "5fd4e64d0fc5a616b798edbca7327da33c78eb02"}
   io.github.kotoba-lang/btc-crypto
   {:git/url "https://github.com/kotoba-lang/btc-crypto.git"
-   :git/sha "675f893826db1b01994c7ef9bf9002a2669d54da"}}
+   :git/sha "675f893826db1b01994c7ef9bf9002a2669d54da"}
+  org.xerial/sqlite-jdbc {:mvn/version "3.53.2.0"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

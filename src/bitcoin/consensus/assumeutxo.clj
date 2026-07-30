@@ -3,7 +3,8 @@
 
   A decoded snapshot is not considered usable until its network, base block,
   coin count, and HASH_SERIALIZED commitment all match an explicit checkpoint."
-  (:require [bitcoin.consensus.codec :as codec])
+  (:require [bitcoin.consensus.codec :as codec]
+            [bitcoin.consensus.utxo :as utxo])
   (:import (java.io ByteArrayInputStream InputStream)
            (java.math BigInteger)
            (java.security MessageDigest)))
@@ -259,7 +260,8 @@
   [coins]
   (let [first-hash (MessageDigest/getInstance "SHA-256")]
     (doseq [[[txid vout] coin]
-            (sort-by (fn [[[txid vout] _]] [txid vout]) coins)]
+            (sort-by (fn [[[txid vout] _]] [txid vout])
+                     (utxo/coin-entries coins))]
       (update-digest! first-hash (coin-hash-bytes txid vout coin)))
     (displayed-hash
      (.digest (MessageDigest/getInstance "SHA-256")
@@ -285,8 +287,9 @@
   callers should use the built-in Core v31.1 anchors."
   ([source network header-at-height]
    (load-snapshot source network header-at-height {}))
-  ([source network header-at-height {:keys [checkpoints max-coins]
-                                     :or {max-coins 300000000}}]
+  ([source network header-at-height
+    {:keys [checkpoints max-coins coin-consumer materialize?]
+     :or {max-coins 300000000 materialize? true}}]
    (let [^InputStream input
          (if (instance? InputStream source)
            source
@@ -319,12 +322,13 @@
              (codec/fail! :bitcoin.consensus/snapshot-coin-limit
                           "Snapshot coin count exceeds its resource limit."
                           {:count coin-count :limit max-coins}))
+         digest (MessageDigest/getInstance "SHA-256")
          result
          (loop [remaining coin-count
                 previous-txid nil
-                coins (transient {})]
+                coins (when materialize? (transient {}))]
            (if (zero? remaining)
-             (persistent! coins)
+             (when materialize? (persistent! coins))
              (let [txid (read-bytes! input 32 :txid)
                    _ (when (and previous-txid
                                 (not (neg? (compare previous-txid txid))))
@@ -362,14 +366,24 @@
                                   :bitcoin.consensus/snapshot-coin-height
                                   "Snapshot coin height exceeds its base."
                                   {:coin-height (:height coin)
-                                   :base-height height}))]
+                                   :base-height height}))
+                             key [txid (long vout)]
+                             _ (update-digest!
+                                digest (coin-hash-bytes txid vout coin))
+                             _ (when coin-consumer
+                                 (coin-consumer key coin))]
                          (recur (dec left) vout
-                                (assoc! current [txid (long vout)] coin)))))]
+                                (if materialize?
+                                  (assoc! current key coin)
+                                  current)))))]
                (recur (- remaining output-count) txid next-coins))))
          _ (when-not (= -1 (.read input))
              (codec/fail! :bitcoin.consensus/snapshot-trailing-data
                           "Snapshot has trailing data." {}))
-         commitment (hash-serialized result)]
+         commitment
+         (displayed-hash
+          (.digest (MessageDigest/getInstance "SHA-256")
+                   (.digest digest)))]
      (when-not (= (:hash-serialized checkpoint) commitment)
        (codec/fail! :bitcoin.consensus/snapshot-commitment
                     "Snapshot UTXO commitment does not match its trust anchor."

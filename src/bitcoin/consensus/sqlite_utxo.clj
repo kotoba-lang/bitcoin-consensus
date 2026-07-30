@@ -1,0 +1,490 @@
+(ns bitcoin.consensus.sqlite-utxo
+  "Transactional, ordered SQLite UTXO and undo storage.
+
+  Validation runs against an immutable overlay on one SQL transaction. A
+  caller either commits the complete block delta and undo journal or rolls the
+  transaction back; partially connected blocks are never observable."
+  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+            [bitcoin.consensus.codec :as codec]
+            [bitcoin.consensus.utxo :as utxo]
+            [clojure.string :as str])
+  (:import [java.sql Connection PreparedStatement ResultSet]
+           [javax.sql DataSource]
+           [org.sqlite SQLiteDataSource]))
+
+(def schema-version 1)
+(def ^:private deleted ::deleted)
+
+(def ^:private schema
+  ["CREATE TABLE IF NOT EXISTS consensus_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    ) WITHOUT ROWID"
+   "CREATE TABLE IF NOT EXISTS consensus_coins (
+      txid BLOB NOT NULL CHECK(length(txid) = 32),
+      vout INTEGER NOT NULL CHECK(vout BETWEEN 0 AND 4294967294),
+      value INTEGER NOT NULL CHECK(value BETWEEN 0 AND 2100000000000000),
+      script BLOB NOT NULL,
+      height INTEGER NOT NULL CHECK(height >= 0),
+      coinbase INTEGER NOT NULL CHECK(coinbase IN (0, 1)),
+      PRIMARY KEY(txid, vout)
+    ) WITHOUT ROWID"
+   "CREATE TABLE IF NOT EXISTS consensus_undo_blocks (
+      block_hash TEXT PRIMARY KEY,
+      parent_hash TEXT,
+      height INTEGER NOT NULL,
+      previous_height INTEGER NOT NULL,
+      committed_at INTEGER NOT NULL DEFAULT(unixepoch())
+    ) WITHOUT ROWID"
+   "CREATE TABLE IF NOT EXISTS consensus_undo (
+      block_hash TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      kind INTEGER NOT NULL CHECK(kind IN (0, 1)),
+      txid BLOB NOT NULL CHECK(length(txid) = 32),
+      vout INTEGER NOT NULL,
+      value INTEGER,
+      script BLOB,
+      height INTEGER,
+      coinbase INTEGER,
+      PRIMARY KEY(block_hash, sequence),
+      FOREIGN KEY(block_hash) REFERENCES consensus_undo_blocks(block_hash)
+        ON DELETE CASCADE
+    ) WITHOUT ROWID"])
+
+(defn- fail! [type message data]
+  (codec/fail! type message data))
+
+(defn datasource ^SQLiteDataSource [path-or-url]
+  (let [value (str path-or-url)]
+    (doto (SQLiteDataSource.)
+      (.setUrl (if (str/starts-with? value "jdbc:sqlite:")
+                 value
+                 (str "jdbc:sqlite:" value))))))
+
+(defn- execute-statement! [^Connection connection sql]
+  (with-open [statement (.createStatement connection)]
+    (.execute statement sql)))
+
+(defn- configure! [^Connection connection busy-timeout-ms]
+  (execute-statement! connection "PRAGMA foreign_keys = ON")
+  (execute-statement! connection "PRAGMA synchronous = FULL")
+  (execute-statement! connection (str "PRAGMA busy_timeout = "
+                                      (long busy-timeout-ms)))
+  connection)
+
+(defn- bind! [^PreparedStatement statement params]
+  (doseq [[index value] (map-indexed vector params)]
+    (cond
+      (bytes? value) (.setBytes statement (inc index) value)
+      (nil? value) (.setObject statement (inc index) nil)
+      :else (.setObject statement (inc index) value)))
+  statement)
+
+(defn- execute! [^Connection connection sql params]
+  (with-open [statement (bind! (.prepareStatement connection sql) params)]
+    (.executeUpdate statement)))
+
+(defn- first-row [^Connection connection sql params row-fn]
+  (with-open [statement (bind! (.prepareStatement connection sql) params)
+              result (.executeQuery statement)]
+    (when (.next result)
+      (row-fn result))))
+
+(defn- txid-bytes [txid]
+  (when-not (= 32 (count txid))
+    (fail! :bitcoin.consensus/invalid-outpoint
+           "UTXO transaction ID must contain 32 bytes."
+           {:length (count txid)}))
+  (byte-array (map unchecked-byte txid)))
+
+(defn- bytes-vector [^bytes value]
+  (mapv #(bit-and 0xff %) value))
+
+(defn- read-coin [^ResultSet result offset]
+  {:value (.getLong result offset)
+   :script-pubkey (bytes-vector (.getBytes result (inc offset)))
+   :height (.getLong result (+ offset 2))
+   :coinbase? (not (zero? (.getInt result (+ offset 3))))})
+
+(defn- sql-coin [^Connection connection [txid vout]]
+  (first-row
+   connection
+   "SELECT value, script, height, coinbase
+      FROM consensus_coins WHERE txid = ? AND vout = ?"
+   [(txid-bytes txid) (long vout)]
+   #(read-coin % 1)))
+
+(defrecord SQLiteUTXO [^DataSource datasource busy-timeout-ms network])
+
+(defrecord CoinOverlay [backend ^Connection connection base-count changes closed?]
+  utxo/CoinStore
+  (-coin-get [_ key]
+    (when @closed?
+      (fail! :bitcoin.consensus/closed-utxo-view
+             "UTXO validation view is already closed." {}))
+    (let [entry (find changes key)]
+      (if entry
+        (when-not (= deleted (val entry)) (val entry))
+        (sql-coin connection key))))
+  (-coin-contains? [this key] (some? (utxo/-coin-get this key)))
+  (-coin-assoc [this key coin]
+    (assoc this :changes (assoc changes key coin)))
+  (-coin-dissoc [this key]
+    (assoc this :changes (assoc changes key deleted)))
+  (-coin-entries [_]
+    (fail! :bitcoin.consensus/uncommitted-utxo-enumeration
+           "An uncommitted UTXO overlay cannot be globally enumerated." {}))
+  (-coin-count [_]
+    (+ base-count
+       (reduce-kv
+        (fn [total key value]
+          (let [existed? (some? (sql-coin connection key))]
+            (+ total
+               (cond
+                 (and existed? (= deleted value)) -1
+                 (and (not existed?) (not= deleted value)) 1
+                 :else 0))))
+        0 changes))))
+
+(defn- connection [^SQLiteUTXO backend]
+  (configure! (.getConnection ^DataSource (:datasource backend))
+              (:busy-timeout-ms backend)))
+
+(defn- meta-value [^Connection connection key]
+  (first-row connection
+             "SELECT value FROM consensus_meta WHERE key = ?"
+             [key] #(.getString ^ResultSet % 1)))
+
+(defn- put-meta! [^Connection connection key value]
+  (execute! connection
+            "INSERT INTO consensus_meta(key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            [key (str value)]))
+
+(defn open
+  "Open or initialize a network-bound UTXO database."
+  [{:keys [path datasource network busy-timeout-ms]
+    :or {busy-timeout-ms 5000}}]
+  (when-not (keyword? network)
+    (fail! :bitcoin.consensus/sqlite-network
+           "SQLite UTXO storage requires a network keyword." {:network network}))
+  (when-not (and (integer? busy-timeout-ms) (<= 0 busy-timeout-ms))
+    (fail! :bitcoin.consensus/sqlite-configuration
+           "SQLite busy timeout must be a non-negative integer."
+           {:busy-timeout-ms busy-timeout-ms}))
+  (let [source (or datasource (when path
+                                (bitcoin.consensus.sqlite-utxo/datasource path)))]
+    (when-not (instance? DataSource source)
+      (fail! :bitcoin.consensus/sqlite-configuration
+             "SQLite UTXO storage requires :path or :datasource." {}))
+    (with-open [connection (configure! (.getConnection ^DataSource source)
+                                       busy-timeout-ms)]
+      (execute-statement! connection "PRAGMA journal_mode = WAL")
+      (execute-statement! connection "PRAGMA synchronous = FULL")
+      (doseq [statement schema] (execute-statement! connection statement))
+      (let [stored-version (meta-value connection "schema_version")
+            stored-network (meta-value connection "network")]
+        (when (and stored-version
+                   (not= schema-version (parse-long stored-version)))
+          (fail! :bitcoin.consensus/sqlite-schema
+                 "Unsupported SQLite UTXO schema."
+                 {:expected schema-version :actual stored-version}))
+        (when (and stored-network (not= (name network) stored-network))
+          (fail! :bitcoin.consensus/sqlite-network-mismatch
+                 "SQLite UTXO database belongs to another network."
+                 {:expected network :actual stored-network}))
+        (put-meta! connection "schema_version" schema-version)
+        (put-meta! connection "network" (name network))
+        (when-not (meta-value connection "height")
+          (put-meta! connection "height" -1)
+          (put-meta! connection "coin_count" 0))))
+    (->SQLiteUTXO source busy-timeout-ms network)))
+
+(defn status [backend]
+  (with-open [connection (connection backend)]
+    {:network (:network backend)
+     :height (parse-long (meta-value connection "height"))
+     :tip (meta-value connection "tip")
+     :coin-count (parse-long (meta-value connection "coin_count"))}))
+
+(defn lookup [backend key]
+  (with-open [connection (connection backend)]
+    (sql-coin connection key)))
+
+(defn begin
+  "Begin an isolated validation transaction and return a CoinStore overlay."
+  [backend]
+  (let [connection (connection backend)]
+    (try
+      (.setAutoCommit connection false)
+      (let [count (parse-long (or (meta-value connection "coin_count") "0"))]
+        (->CoinOverlay backend connection count {} (atom false)))
+      (catch Throwable error
+        (.close connection)
+        (throw error)))))
+
+(defn rollback!
+  [^CoinOverlay view]
+  (when (compare-and-set! (:closed? view) false true)
+    (try
+      (.rollback ^Connection (:connection view))
+      (finally (.close ^Connection (:connection view)))))
+  nil)
+
+(declare commit-block!)
+
+(defn connect-block!
+  "Validate one parsed block directly against the disk-backed UTXO view and
+  atomically commit its delta and undo journal.
+
+  Contextual header/deployment checks remain the chainstate caller's
+  responsibility; this function owns the value, maturity, Script, sigop and
+  transaction-level UTXO transition."
+  ([backend block block-context verify-script]
+   (connect-block! backend block block-context verify-script {}))
+  ([backend block
+    {:keys [block-hash parent-hash height previous-height]}
+    verify-script options]
+   (let [view (begin backend)]
+     (try
+       (let [{:keys [state undo]}
+             (utxo/apply-block-with-undo
+              {:height previous-height :coins view}
+              block height verify-script options)]
+         (commit-block!
+          (:coins state)
+          {:block-hash block-hash :parent-hash parent-hash
+           :height height :previous-height previous-height :undo undo}))
+       (catch Throwable error
+         ;; commit-block! closes its view on either outcome; rollback! is
+         ;; idempotent and handles validation failures before commit begins.
+         (rollback! view)
+         (throw error))))))
+
+(defn- insert-coin! [connection [txid vout] coin]
+  (execute!
+   connection
+   "INSERT INTO consensus_coins(txid, vout, value, script, height, coinbase)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(txid, vout) DO UPDATE SET
+      value=excluded.value, script=excluded.script,
+      height=excluded.height, coinbase=excluded.coinbase"
+   [(txid-bytes txid) (long vout) (long (:value coin))
+    (byte-array (map unchecked-byte (:script-pubkey coin)))
+    (long (:height coin)) (if (:coinbase? coin) 1 0)]))
+
+(defn- delete-coin! [connection [txid vout]]
+  (execute! connection
+            "DELETE FROM consensus_coins WHERE txid = ? AND vout = ?"
+            [(txid-bytes txid) (long vout)]))
+
+(defn import-snapshot!
+  "Stream an authenticated Core v2 AssumeUTXO snapshot directly into SQLite.
+  No Clojure map proportional to the UTXO set is created. Authentication
+  failure rolls back every inserted coin."
+  ([backend source header-at-height]
+   (import-snapshot! backend source header-at-height {}))
+  ([backend source header-at-height options]
+   (with-open [connection (connection backend)]
+     (let [auto-commit (.getAutoCommit connection)]
+       (try
+         (.setAutoCommit connection false)
+         (let [current-count
+               (first-row connection "SELECT count(*) FROM consensus_coins" []
+                          #(.getLong ^ResultSet % 1))]
+           (when-not (zero? current-count)
+             (fail! :bitcoin.consensus/sqlite-snapshot-nonempty
+                    "AssumeUTXO import requires an empty UTXO database."
+                    {:coin-count current-count}))
+           (let [loaded
+                 (assumeutxo/load-snapshot
+                  source (:network backend) header-at-height
+                  (assoc options
+                         :materialize? false
+                         :coin-consumer
+                         #(insert-coin! connection %1 %2)))
+                 {:keys [base-height base-blockhash coins-count]}
+                 (:snapshot loaded)]
+             (put-meta! connection "height" base-height)
+             (put-meta! connection "tip" base-blockhash)
+             (put-meta! connection "coin_count" coins-count)
+             (.commit connection)
+             (:snapshot loaded)))
+         (catch Throwable error
+           (.rollback connection)
+           (throw error))
+         (finally
+           (.setAutoCommit connection auto-commit)))))))
+
+(defn commit-block!
+  "Atomically commit a validated overlay, its reversible undo, and new tip.
+  The database tip must still equal `parent-hash`/`previous-height`."
+  [^CoinOverlay view
+   {:keys [block-hash parent-hash height previous-height undo]}]
+  (let [^Connection connection (:connection view)]
+    (when @(:closed? view)
+      (fail! :bitcoin.consensus/closed-utxo-view
+             "UTXO validation view is already closed." {}))
+    (try
+      (let [actual-height (parse-long (meta-value connection "height"))
+            actual-tip (meta-value connection "tip")]
+        (when-not (= height (inc previous-height))
+          (fail! :bitcoin.consensus/sqlite-height
+                 "UTXO block height must immediately follow its parent."
+                 {:height height :previous-height previous-height}))
+        (when-not (and (= previous-height actual-height)
+                       (= parent-hash actual-tip))
+          (fail! :bitcoin.consensus/sqlite-stale-tip
+                 "SQLite UTXO tip changed during validation."
+                 {:expected-height previous-height :actual-height actual-height
+                  :expected-tip parent-hash :actual-tip actual-tip}))
+        (execute!
+         connection
+         "INSERT INTO consensus_undo_blocks
+          (block_hash, parent_hash, height, previous_height)
+          VALUES (?, ?, ?, ?)"
+         [block-hash parent-hash height previous-height])
+        (doseq [[sequence [kind key coin]]
+                (map-indexed
+                 vector
+                 (concat
+                  (map (fn [[key coin]] [0 key coin]) (:spent undo))
+                  (map (fn [key] [1 key nil]) (:created undo))))]
+          (let [[txid vout] key]
+            (execute!
+             connection
+             "INSERT INTO consensus_undo
+              (block_hash, sequence, kind, txid, vout, value, script,
+               height, coinbase)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             [block-hash sequence kind (txid-bytes txid) (long vout)
+              (:value coin)
+              (when coin (byte-array
+                          (map unchecked-byte (:script-pubkey coin))))
+              (:height coin)
+              (when coin (if (:coinbase? coin) 1 0))])))
+        (let [next-count (utxo/coin-count view)]
+          (doseq [[key value] (:changes view)]
+            (if (= deleted value)
+              (delete-coin! connection key)
+              (insert-coin! connection key value)))
+          (put-meta! connection "height" height)
+          (put-meta! connection "tip" block-hash)
+          (put-meta! connection "coin_count" next-count)
+          (.commit connection)
+          (reset! (:closed? view) true)
+          {:height height :tip block-hash :coin-count next-count}))
+      (catch Throwable error
+        (.rollback connection)
+        (reset! (:closed? view) true)
+        (throw error))
+      (finally
+        (.close connection)))))
+
+(defn disconnect-tip!
+  "Atomically reverse the current tip using its durable undo journal."
+  [backend expected-block-hash]
+  (with-open [connection (connection backend)]
+    (let [auto-commit (.getAutoCommit connection)]
+      (try
+        (.setAutoCommit connection false)
+        (let [tip (meta-value connection "tip")
+              block
+              (first-row
+               connection
+               "SELECT parent_hash, previous_height
+                  FROM consensus_undo_blocks WHERE block_hash = ?"
+               [expected-block-hash]
+               (fn [^ResultSet result]
+                 {:parent (.getString result 1)
+                  :height (.getLong result 2)}))]
+          (when-not (= expected-block-hash tip)
+            (fail! :bitcoin.consensus/sqlite-stale-tip
+                   "Refusing to disconnect a non-tip block."
+                   {:expected expected-block-hash :actual tip}))
+          (when-not block
+            (fail! :bitcoin.consensus/missing-undo
+                   "SQLite UTXO tip has no durable undo journal."
+                   {:hash expected-block-hash}))
+          (with-open [statement
+                      (bind!
+                       (.prepareStatement
+                        connection
+                        "SELECT kind, txid, vout, value, script, height, coinbase
+                           FROM consensus_undo WHERE block_hash = ?
+                           ORDER BY sequence DESC")
+                       [expected-block-hash])
+                      result (.executeQuery statement)]
+            (loop []
+              (when (.next result)
+                (let [kind (.getInt result 1)
+                      key [(bytes-vector (.getBytes result 2))
+                           (.getLong result 3)]]
+                  (if (= kind 1)
+                    (delete-coin! connection key)
+                    (insert-coin!
+                     connection key
+                     {:value (.getLong result 4)
+                      :script-pubkey (bytes-vector (.getBytes result 5))
+                      :height (.getLong result 6)
+                      :coinbase? (not (zero? (.getInt result 7)))})))
+                (recur))))
+          (execute! connection
+                    "DELETE FROM consensus_undo_blocks WHERE block_hash = ?"
+                    [expected-block-hash])
+          (let [next-count
+                (first-row connection "SELECT count(*) FROM consensus_coins" []
+                           #(.getLong ^ResultSet % 1))]
+            (put-meta! connection "height" (:height block))
+            (if-let [parent (:parent block)]
+              (put-meta! connection "tip" parent)
+              (execute! connection
+                        "DELETE FROM consensus_meta WHERE key = 'tip'" []))
+            (put-meta! connection "coin_count" next-count)
+            (.commit connection)
+            {:height (:height block) :tip (:parent block)
+             :coin-count next-count}))
+        (catch Throwable error
+          (.rollback connection)
+          (throw error))
+        (finally
+          (.setAutoCommit connection auto-commit))))))
+
+(defn integrity-check!
+  "Run SQLite's full page/B-tree integrity check and metadata count check."
+  [backend]
+  (with-open [connection (connection backend)]
+    (let [integrity
+          (first-row connection "PRAGMA integrity_check" []
+                     #(.getString ^ResultSet % 1))
+          actual
+          (first-row connection "SELECT count(*) FROM consensus_coins" []
+                     #(.getLong ^ResultSet % 1))
+          claimed (parse-long (meta-value connection "coin_count"))]
+      (when-not (= "ok" integrity)
+        (fail! :bitcoin.consensus/sqlite-corrupt
+               "SQLite integrity_check failed." {:result integrity}))
+      (when-not (= actual claimed)
+        (fail! :bitcoin.consensus/sqlite-count-mismatch
+               "SQLite UTXO metadata count is inconsistent."
+               {:expected claimed :actual actual}))
+      {:integrity :ok :coin-count actual})))
+
+(defn entries
+  "Return a reducible ordered stream of committed UTXO entries. The stream is
+  consumed inside this call so JDBC resources cannot escape."
+  [backend reduce-fn initial]
+  (with-open [connection (connection backend)
+              statement (.prepareStatement
+                         connection
+                         "SELECT txid, vout, value, script, height, coinbase
+                            FROM consensus_coins ORDER BY txid, vout")
+              result (.executeQuery statement)]
+    (loop [acc initial]
+      (if (.next result)
+        (let [entry
+              [[(bytes-vector (.getBytes result 1)) (.getLong result 2)]
+               (read-coin result 3)]
+              next (reduce-fn acc entry)]
+          (if (reduced? next) @next (recur next)))
+        acc))))

@@ -5,7 +5,9 @@
   consensus kernel. Unsupported policy flags are reported as skipped rather
   than silently ignored."
   (:require [bitcoin.consensus.script :as script]
+            [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.transaction :as transaction]
+            [btc-crypto.schnorr :as schnorr]
             [clojure.data.json :as json]
             [clojure.string :as string]
             [sha256d.core :as sha256d])
@@ -57,19 +59,26 @@
    "WITNESS" :witness
    "CLEANSTACK" :cleanstack
    "WITNESS_PUBKEYTYPE" :compressed-pubkey
+   "MINIMALDATA" :minimal-data
+   "MINIMALIF" :minimal-if
+   "NULLFAIL" :nullfail
+   "SIGPUSHONLY" :sig-push-only
+   "DISCOURAGE_UPGRADABLE_NOPS" :discourage-upgradable-nops
+   "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"
+   :discourage-upgradable-witness-program
    "TAPROOT" :taproot})
 
 (def unsupported-flags
-  #{"MINIMALDATA" "NULLFAIL" "MINIMALIF" "CONST_SCRIPTCODE"
-    "DISCOURAGE_UPGRADABLE_NOPS"
-    "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"
-    "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"
+  #{"CONST_SCRIPTCODE" "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"
     "DISCOURAGE_OP_SUCCESS" "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"})
 
 (defn- hex-bytes [value]
   (if (empty? value)
     []
     (mapv #(Integer/parseInt (apply str %) 16) (partition 2 value))))
+
+(defn- bytes-hex [bytes]
+  (apply str (map #(format "%02x" (bit-and 0xff %)) bytes)))
 
 (defn- script-number [value]
   (cond
@@ -171,11 +180,56 @@
        :script-sig script-sig :script-pubkey script-pubkey
        :flags flag-source :expected expected :comments comments})))
 
+(def taproot-internal-key
+  (hex-bytes
+   "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"))
+
+(defn- preprocess-taproot-vector [value]
+  (if-not (some #(and (string? %) (string/includes? % "#"))
+                (tree-seq coll? seq value))
+    value
+    (let [witness-and-amount (first value)
+          script-source
+          (some #(when (and (string? %)
+                            (string/starts-with? % "#SCRIPT#"))
+                   (subs % (count "#SCRIPT#")))
+                witness-and-amount)
+          tapscript (assembly script-source)
+          tapleaf-hash
+          (schnorr/tagged-hash
+           "TapLeaf"
+           (concat [0xc0]
+                   (codec/compact-size (count tapscript))
+                   tapscript))
+          tweaked
+          (schnorr/tweak-public-key taproot-internal-key tapleaf-hash)
+          control-block
+          (vec (concat [(+ 0xc0 (:parity tweaked))]
+                       taproot-internal-key))
+          witness
+          (mapv
+           (fn [element]
+             (cond
+               (and (string? element)
+                    (string/starts-with? element "#SCRIPT#"))
+               (bytes-hex tapscript)
+
+               (= element "#CONTROLBLOCK#")
+               (bytes-hex control-block)
+
+               :else element))
+           witness-and-amount)]
+      (-> value
+          (assoc 0 witness)
+          (assoc 2
+                 (string/replace
+                  (nth value 2)
+                  "#TAPROOTOUTPUT#"
+                  (str "0x" (bytes-hex (:x tweaked)))))))))
+
 (defn- run-vector [index value]
-  (if (some #(and (string? %) (string/includes? % "#"))
-            (tree-seq coll? seq value))
-    {:status :skipped}
-    (let [{:keys [witness amount script-sig script-pubkey
+  (let [value (preprocess-taproot-vector value)
+        {:keys [witness amount script-sig script-pubkey
                   expected comments]
            flag-source :flags} (vector-parts value)
           active-flags (flags flag-source)]
@@ -196,7 +250,7 @@
             {:status :failed :index index :expected expected
              :actual (if actual "OK" "FAIL")
              :flags flag-source :comments comments
-             :script-sig script-sig :script-pubkey script-pubkey}))))))
+             :script-sig script-sig :script-pubkey script-pubkey})))))
 
 (defn -main [& [path]]
   (when-not path

@@ -9,6 +9,46 @@
 (def halving-interval 210000)
 (def max-block-sigop-cost 80000)
 
+(defprotocol CoinStore
+  "Persistent-map semantics required by consensus. Implementations may return
+  immutable overlays backed by an on-disk ordered store."
+  (-coin-get [coins key])
+  (-coin-contains? [coins key])
+  (-coin-assoc [coins key coin])
+  (-coin-dissoc [coins key])
+  (-coin-entries [coins])
+  (-coin-count [coins]))
+
+(defn coin-get [coins key]
+  (if (satisfies? CoinStore coins)
+    (-coin-get coins key)
+    (get coins key)))
+
+(defn coin-contains? [coins key]
+  (if (satisfies? CoinStore coins)
+    (-coin-contains? coins key)
+    (contains? coins key)))
+
+(defn coin-assoc [coins key coin]
+  (if (satisfies? CoinStore coins)
+    (-coin-assoc coins key coin)
+    (assoc coins key coin)))
+
+(defn coin-dissoc [coins key]
+  (if (satisfies? CoinStore coins)
+    (-coin-dissoc coins key)
+    (dissoc coins key)))
+
+(defn coin-entries [coins]
+  (if (satisfies? CoinStore coins)
+    (-coin-entries coins)
+    (seq coins)))
+
+(defn coin-count [coins]
+  (if (satisfies? CoinStore coins)
+    (-coin-count coins)
+    (count coins)))
+
 (defn block-subsidy
   ([height] (block-subsidy height halving-interval))
   ([height interval]
@@ -23,7 +63,7 @@
 (defn- spend-input
   [state transaction input-index input height verify-script]
   (let [key (outpoint-key (:txid-natural input) (:vout input))
-        coin (get-in state [:coins key])]
+        coin (coin-get (:coins state) key)]
     (when-not coin
       (codec/fail! :bitcoin.consensus/missing-input
                    "Transaction spends a missing or already-spent output."
@@ -38,7 +78,7 @@
       (codec/fail! :bitcoin.consensus/script-failed
                    "Input script verification failed."
                    {:input-index input-index}))
-    [(update state :coins dissoc key) (:value coin)]))
+    [(update state :coins coin-dissoc key) (:value coin)]))
 
 (defn- provably-unspendable? [output]
   (= 0x6a (first (:script-pubkey output))))
@@ -51,12 +91,12 @@
        result
        (let [key (outpoint-key (:txid-natural transaction) index)]
        (when (and (not allow-overwrite?)
-                  (contains? (:coins result) key))
+                  (coin-contains? (:coins result) key))
          (codec/fail! :bitcoin.consensus/overwrite-unspent
                       "Transaction would overwrite an unspent output."
                       {:outpoint key}))
-         (assoc-in result [:coins key]
-                   (assoc output :height height :coinbase? coinbase?)))))
+         (update result :coins coin-assoc key
+                 (assoc output :height height :coinbase? coinbase?)))))
    state (vec (:outputs transaction))))
 
 (defn- validate-sequence-locks!
@@ -65,10 +105,10 @@
     (let [prev-heights
           (mapv
            (fn [input]
-             (or (get-in state
-                         [:coins
-                          (outpoint-key (:txid-natural input) (:vout input))
-                          :height])
+             (or (:height
+                  (coin-get
+                   (:coins state)
+                   (outpoint-key (:txid-natural input) (:vout input))))
                  (codec/fail! :bitcoin.consensus/missing-input
                               "Transaction spends a missing output."
                               {:outpoint [(:txid-natural input)
@@ -86,8 +126,8 @@
 (defn- input-coins [state transaction]
   (mapv
    (fn [input]
-     (get-in state
-             [:coins (outpoint-key (:txid-natural input) (:vout input))]))
+     (coin-get (:coins state)
+               (outpoint-key (:txid-natural input) (:vout input))))
    (:inputs transaction)))
 
 (defn- add-sigop-cost!
@@ -168,16 +208,34 @@
    (let [next-state (apply-block state block height verify-script options)
         before (:coins state)
         after (:coins next-state)
+        touched
+        (into #{}
+              (mapcat
+               (fn [transaction]
+                 (concat
+                  (map (fn [input]
+                         (outpoint-key (:txid-natural input) (:vout input)))
+                       (:inputs transaction))
+                  (keep-indexed
+                   (fn [index output]
+                     (when-not (provably-unspendable? output)
+                       (outpoint-key (:txid-natural transaction) index)))
+                   (:outputs transaction))))
+               (:transactions block)))
         spent (into {}
-                    (keep (fn [[key coin]]
-                            (when (not= coin (get after key ::missing))
-                              [key coin])))
-                    before)
+                    (keep (fn [key]
+                            (let [coin (coin-get before key)]
+                              (when (and coin
+                                         (not= coin (coin-get after key)))
+                                [key coin]))))
+                    touched)
         created (into #{}
-                      (keep (fn [[key coin]]
-                              (when (not= coin (get before key ::missing))
-                                key)))
-                      after)]
+                      (keep (fn [key]
+                              (let [coin (coin-get after key)]
+                                (when (and coin
+                                           (not= coin (coin-get before key)))
+                                  key))))
+                      touched)]
      {:state next-state
       :undo {:height (:height state) :spent spent :created created}})))
 
@@ -185,6 +243,6 @@
   "Reverse exactly one apply-block-with-undo transition."
   [state {:keys [height spent created]}]
   (-> state
-      (update :coins #(apply dissoc % created))
-      (update :coins merge spent)
+      (update :coins #(reduce coin-dissoc % created))
+      (update :coins #(reduce-kv coin-assoc % spent))
       (assoc :height height)))

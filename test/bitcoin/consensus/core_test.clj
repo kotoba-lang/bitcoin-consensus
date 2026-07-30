@@ -1044,6 +1044,18 @@
     (is (= coins (get-in loaded [:utxo :coins])))
     (is (= :assumed (get-in loaded [:snapshot :status])))
     (is (= 2 (get-in loaded [:snapshot :coins-count])))
+    (let [streamed (atom [])
+          disk-loaded
+          (assumeutxo/load-snapshot
+           snapshot :regtest #(when (= % 2) base-hash)
+           (assoc options
+                  :materialize? false
+                  :coin-consumer
+                  (fn [key coin] (swap! streamed conj [key coin]))))]
+      (is (nil? (get-in disk-loaded [:utxo :coins])))
+      (is (= (vec (sort-by first coins)) @streamed))
+      (is (= commitment
+             (get-in disk-loaded [:snapshot :hash-serialized]))))
     (is (= :bitcoin.consensus/snapshot-header-mismatch
            (error-type
             #(assumeutxo/load-snapshot

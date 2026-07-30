@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0 — 2026-07-30
+
+- Match all 1,222 Bitcoin Core v31.1 Script vector outcomes with no skipped
+  fixtures, including generated Taproot trees and policy flag behavior.
+- Add an ordered, network-bound SQLite UTXO backend with WAL/FULL durability,
+  immutable validation overlays, atomic coin + undo commits, durable
+  disconnect, stale-tip protection, and integrity verification.
+- Build undo from only the outpoints touched by a block instead of scanning the
+  complete UTXO set.
+- Stream authenticated Core v2 AssumeUTXO snapshots directly into SQLite
+  without materializing the coin set, rolling back all rows on commitment
+  failure.
+- Add a resumable Core historical-range differential harness with pruned-data,
+  checkpoint-height, block hash/size/weight, and final-tip guards.
+
 ## 0.5.2 — 2026-07-30
 
 - Parameterize the live Core differential for long regtest histories.

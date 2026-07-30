@@ -433,7 +433,7 @@
                          (<= (count data) 0xffff)
                          (= opcode op-pushdata2)
                          :else (= opcode op-pushdata4)))]
-               (when-not minimal-push?
+               (when (and executing? (not minimal-push?))
                  (fail! :bitcoin.consensus/minimal-data
                         "Script push is not minimally encoded." {}))
                (let [stack (if executing? (conj stack data) stack)]
@@ -460,10 +460,15 @@
              (= opcode op-notif)
              (if executing?
                (let [[stack value] (pop-stack stack opcode)
-                     _ (when (and tapscript?
+                     _ (when (and (or tapscript?
+                                      (= (:sigversion context)
+                                         :witness-v0))
+                                  (or tapscript?
+                                      (contains? (:flags context)
+                                                 :minimal-if))
                                   (not (contains? #{[] [1]} value)))
                          (fail! :bitcoin.consensus/minimal-if
-                                "Tapscript NOTIF argument must be empty or 1."
+                                "Witness NOTIF argument must be empty or 1."
                                 {}))]
                  (recur (rest remaining) stack altstack
                         (conj conditions (not (truthy? value)))
@@ -513,8 +518,15 @@
              (or (= opcode 0x61)
                  (= opcode 0xb0)
                  (<= 0xb3 opcode 0xb9))
-             (recur (rest remaining) stack altstack conditions
-                    op-count code-separator)
+             (do
+               (when (and (contains? (:flags context)
+                                     :discourage-upgradable-nops)
+                          (not= opcode 0x61))
+                 (fail! :bitcoin.consensus/discouraged-nop
+                        "Executed upgradable NOP is discouraged."
+                        {:opcode opcode}))
+               (recur (rest remaining) stack altstack conditions
+                      op-count code-separator))
 
              (= opcode op-verify)
              (let [[stack value] (pop-stack stack opcode)]
@@ -834,6 +846,11 @@
                       (assoc context :script script
                              :code-separator code-separator)
                       signature-value pubkey)]
+                 (when (and (not valid?)
+                            (contains? (:flags context) :nullfail)
+                            (seq signature-value))
+                   (fail! :bitcoin.consensus/signature-nullfail
+                          "Failed CHECKSIG signature must be empty." {}))
                  (when (and (= opcode op-checksigverify) (not valid?))
                    (fail! :bitcoin.consensus/checksigverify
                           "OP_CHECKSIGVERIFY failed." {}))
@@ -918,6 +935,12 @@
                                     (inc key-index))
                              :else
                              (recur signature-index (inc key-index))))]
+                     (when (and (not valid?)
+                                (contains? (:flags context) :nullfail)
+                                (some seq signatures))
+                       (fail! :bitcoin.consensus/signature-nullfail
+                              "Failed CHECKMULTISIG signatures must be empty."
+                              {}))
                      (when (and (= opcode op-checkmultisigverify)
                                 (not valid?))
                        (fail! :bitcoin.consensus/checkmultisigverify
@@ -1129,7 +1152,11 @@
 
     (not= version 0)
     ;; Unknown witness versions are anyone-can-spend until a soft fork.
-    true
+    (if (contains? flags :discourage-upgradable-witness-program)
+      (fail! :bitcoin.consensus/discouraged-witness-program
+             "Upgradable witness program is discouraged."
+             {:version version})
+      true)
 
     :else
     (let [[stack script]
@@ -1180,6 +1207,10 @@
          witness (vec (or (nth (:witnesses transaction) input-index nil) []))
          context {:transaction transaction :input-index input-index
                   :coin coin :sigversion :base :flags flags}
+         _ (when (and (contains? flags :sig-push-only)
+                      (not (push-only? script-sig)))
+             (fail! :bitcoin.consensus/sig-push-only
+                    "scriptSig must contain only push operations." {}))
          stack-after-sig (evaluate [] script-sig context)
          saved-stack stack-after-sig
          stack-after-pubkey

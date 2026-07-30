@@ -21,20 +21,24 @@ This repository is separate from the permanently read-only
 - legacy/P2SH/witness sigop accounting with the 80,000 block-cost limit
 - transaction finality plus BIP34/BIP113 and relative lock-time validation
 - atomic UTXO application, coinbase maturity, per-network subsidy, fees, and undo
+- network-bound SQLite UTXO storage with WAL/FULL durability, ordered outpoints,
+  atomic block delta + undo commits, stale-tip rejection, restart-safe
+  disconnect, integrity checks, and O(touched outpoints) transition memory
 - provably unspendable output pruning and signed transaction-version handling
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data
 - Bitcoin Core-compatible `assumevalid` gates: assumed/best chain ancestry,
   minimum chainwork, and more than two weeks of proof-equivalent burial
 - authenticated Core v2 AssumeUTXO streaming decode for mainnet, testnet3,
-  testnet4, and signet, including exact `hash_serialized_3` commitments
+  testnet4, and signet, including exact `hash_serialized_3` commitments and
+  constant-memory authenticated import into SQLite
 - separate assumed and background-validated snapshot states
 - checksummed atomic chainstate v2 persistence, v1 migration, and restart
   invariant validation
 - bounded multi-peer block scheduling, response matching, timeout requeue, and
   misbehavior scoring
 - official BIP143/BIP340/BIP341 vectors, mainnet genesis/block 1 fixtures,
-  1,033 applicable Bitcoin Core v31.1 Script outcomes, and mined multi-block
+  all 1,222 Bitcoin Core v31.1 Script outcomes, and mined multi-block
   plus Core-generated AssumeUTXO regtest differential conformance
 
 ## Security boundary
@@ -45,12 +49,12 @@ snapshots are activated only after their network, independently validated base
 header, coin count, and Core commitment match a pinned checkpoint; promotion
 to `:validated` additionally requires a full background chainstate match.
 
-This is still not a drop-in Bitcoin Core replacement. Of 1,222 upstream Script
-vectors, 1,033 using implemented consensus/policy flags run in CI with exact
-success/failure parity; 189 requiring unimplemented policy flags or Core's
-generated Taproot placeholders are explicitly skipped. Full historical-chain
-differential validation and a disk-backed UTXO backend sized for mainnet remain
-required. Script, AssumeUTXO, and persistence adapters are currently JVM-only;
+This is still not a drop-in Bitcoin Core replacement. All 1,222 upstream Script
+vectors run in CI with exact success/failure parity, including Core-generated
+Taproot fixtures and policy flags. The mainnet-sized disk UTXO/undo backend is
+available, but selecting it in the higher-level `bitcoin-node` host and
+completing a full genesis-to-tip historical differential run remain required.
+Script, AssumeUTXO, and persistence adapters are currently JVM-only;
 wire codecs, consensus values, BIP9, headers-first state, and scheduling remain
 portable Clojure/ClojureScript values.
 
@@ -60,6 +64,14 @@ clojure -M:lint
 clojure -M:coverage
 ./scripts/core_regtest_differential.sh # requires bitcoind + bitcoin-cli
 ./scripts/core_script_vectors.sh       # pinned Bitcoin Core v31.1 vectors
+
+# Resume a real Core-backed historical range from a durable kernel checkpoint:
+CONSENSUS_CORE_DATADIR=/path/to/bitcoin \
+CONSENSUS_HISTORY_NETWORK=mainnet \
+CONSENSUS_HISTORY_START=0 \
+CONSENSUS_HISTORY_END=9999 \
+CONSENSUS_HISTORY_CHAINSTATE=/path/to/kernel-chainstate.edn \
+./scripts/core_history_differential.sh
 
 # Long differential with restart/reload every 250 blocks:
 CONSENSUS_DIFFERENTIAL_BLOCKS=1003 \
