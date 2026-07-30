@@ -2,11 +2,14 @@
   (:require [bitcoin.consensus.block :as block]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
+            [bitcoin.consensus.storage :as storage]
+            [bitcoin.consensus.sync :as sync]
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [clojure.test :refer [deftest is]]
             [kotobase.bitcoin.protocol :as header]
-            [sha256d.core :as sha256d]))
+            [sha256d.core :as sha256d])
+  (:import (java.nio.file Files)))
 
 (def genesis-block-hex
   "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000")
@@ -338,3 +341,70 @@
                         [:nodes (get-in a2 [:header :hash-hex]) :active?])))
     (is (true? (get-in reorganized
                        [:nodes (get-in b2 [:header :hash-hex]) :active?])))))
+
+(deftest chainstate-snapshot-is-atomic-checksummed-and-network-bound
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        first-block (mine-regtest-block genesis 1 30)
+        state (-> (chainstate/initialize :regtest genesis (constantly true))
+                  (chainstate/accept-block first-block 2000000000
+                                           (constantly true)))
+        directory
+        (Files/createTempDirectory
+         "bitcoin-consensus-test"
+         (make-array java.nio.file.attribute.FileAttribute 0))
+        path (.resolve directory "chainstate.edn")]
+    (try
+      (storage/save! path state)
+      (is (= state (storage/load! path :regtest)))
+      (is (= :bitcoin.consensus/chainstate-network-mismatch
+             (error-type #(storage/load! path :mainnet))))
+      (let [damaged (storage/encode state)]
+        (aset-byte damaged (dec (alength damaged))
+                   (unchecked-byte
+                    (bit-xor 1 (bit-and 0xff
+                                            (aget damaged
+                                                  (dec (alength damaged)))))))
+        (is (= :bitcoin.consensus/chainstate-checksum-mismatch
+               (error-type #(storage/decode damaged :regtest)))))
+      (let [corrupt
+            (assoc-in state [:nodes (:active-tip state) :active?] false)]
+        (is (= :bitcoin.consensus/corrupt-chainstate
+               (error-type
+                #(storage/decode (storage/encode corrupt) :regtest)))))
+      (finally
+        (Files/deleteIfExists path)
+        (Files/deleteIfExists directory)))))
+
+(deftest multi-peer-sync-is-bounded-matches-responses-and-requeues-timeouts
+  (let [hashes (mapv #(format "%064x" %) (range 20))
+        initial (-> (sync/create hashes)
+                    (sync/register-peer :peer-a)
+                    (sync/register-peer :peer-b))
+        [assigned requested] (sync/assign initial :peer-a 1000)
+        first-hash (first requested)
+        parsed-block {:header {:hash-hex first-hash}}
+        wrong-peer
+        (sync/process-block assigned :peer-b first-hash parsed-block)
+        accepted
+        (sync/process-block (:state wrong-peer)
+                            :peer-a first-hash parsed-block)
+        expired (sync/expire (:state accepted) 1030)]
+    (is (= sync/max-inflight-per-peer (count requested)))
+    (is (= 19 (count (:pending expired))))
+    (is (= (count (:pending expired))
+           (count (set (:pending expired))))
+        "every uncompleted hash remains scheduled exactly once")
+    (is (= :wrong-peer (:error wrong-peer)))
+    (is (= 20 (get-in wrong-peer [:state :peers :peer-b :misbehavior])))
+    (is (:accepted? accepted))
+    (is (contains? (get-in accepted [:state :completed]) first-hash))
+    (is (= 5 (get-in expired [:peers :peer-a :misbehavior])))
+    (is (empty? (:inflight expired)))
+    (is (= 20 (+ (count (:pending expired))
+                 (count (:completed expired)))))
+    (is (false? (sync/eligible?
+                 (:state
+                  (sync/process-block
+                   assigned :peer-a first-hash
+                   {:header {:hash-hex "wrong"}}))
+                 :peer-a)))))

@@ -16,6 +16,9 @@ This repository is separate from the permanently read-only
 - transaction finality plus BIP34/BIP113/SegWit network activation heights
 - atomic UTXO application, coinbase maturity, fees/subsidy, and undo records
 - most-cumulative-work fork choice and tested multi-block reorganization
+- checksummed atomic chainstate persistence with restart invariant validation
+- bounded multi-peer block scheduling, response matching, timeout requeue, and
+  misbehavior scoring
 - mainnet genesis/block 1 fixtures and mined regtest fork conformance
 
 ## Security boundary
@@ -23,9 +26,10 @@ This repository is separate from the permanently read-only
 This is not yet a complete Bitcoin Core replacement. The mandatory
 `verify-script` callback deliberately fails closed when absent, but the
 in-process Script engine (legacy, P2SH, SegWit, Taproot/Schnorr), relative
-locktime, sigop accounting, versionbits deployments, persistent chainstate,
-assumevalid/assumeutxo, multi-peer block download, fuzzing, and broad
-differential validation remain release blockers.
+locktime, sigop accounting, versionbits deployments,
+assumevalid/assumeutxo, network transport integration, fuzzing, and broad
+differential validation remain release blockers. The persistence adapter is
+currently JVM-only; the consensus state and sync scheduler remain pure values.
 
 ```bash
 clojure -M:test
