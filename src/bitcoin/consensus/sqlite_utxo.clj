@@ -13,7 +13,10 @@
            [javax.sql DataSource]
            [org.sqlite SQLiteDataSource]))
 
-(def schema-version 4)
+(def schema-version 5)
+(def maximum-pending-block-bytes 4000000)
+(def maximum-pending-block-count 4096)
+(def maximum-pending-total-bytes (* 4 1024 1024 1024))
 (def ^:private deleted ::deleted)
 
 (def ^:private schema
@@ -59,6 +62,15 @@
    "CREATE TABLE IF NOT EXISTS consensus_header_nodes (
       hash TEXT PRIMARY KEY,
       node BLOB NOT NULL CHECK(length(node) = 151)
+    ) WITHOUT ROWID"
+   "CREATE TABLE IF NOT EXISTS consensus_pending_blocks (
+      hash TEXT PRIMARY KEY,
+      raw BLOB NOT NULL CHECK(
+        length(raw) BETWEEN 81 AND 4000000
+      ),
+      stored_at INTEGER NOT NULL DEFAULT(unixepoch()),
+      FOREIGN KEY(hash) REFERENCES consensus_header_nodes(hash)
+        ON DELETE CASCADE
     ) WITHOUT ROWID"])
 
 (defn- fail! [type message data]
@@ -201,7 +213,7 @@
       (let [stored-version (meta-value connection "schema_version")
             stored-network (meta-value connection "network")]
         (when (and stored-version
-                   (not (contains? #{1 2 3 schema-version}
+                   (not (contains? #{1 2 3 4 schema-version}
                                    (parse-long stored-version))))
           (fail! :bitcoin.consensus/sqlite-schema
                  "Unsupported SQLite UTXO schema."
@@ -686,7 +698,92 @@
       (delete-coin! connection key)
       (insert-coin! connection key value))))
 
-(declare save-host-and-headers!)
+(defn- pending-status* [connection]
+  (first-row
+   connection
+   "SELECT count(*), COALESCE(sum(length(raw)), 0)
+      FROM consensus_pending_blocks"
+   []
+   (fn [^ResultSet result]
+     {:pending-blocks (.getLong result 1)
+      :pending-bytes (.getLong result 2)})))
+
+(defn pending-status
+  "Return bounded side-branch staging utilization."
+  [backend]
+  (with-open [connection (connection backend)]
+    (pending-status* connection)))
+
+(defn pending-block
+  "Load one staged raw block, or nil when it is not retained."
+  [backend hash]
+  (with-open [connection (connection backend)]
+    (first-row
+     connection
+     "SELECT raw FROM consensus_pending_blocks WHERE hash = ?"
+     [hash]
+     #(.getBytes ^ResultSet % 1))))
+
+(defn- validate-pending-options!
+  [{:keys [store delete maximum-count maximum-bytes]
+    :or {store {}
+         delete []
+         maximum-count maximum-pending-block-count
+         maximum-bytes maximum-pending-total-bytes}}]
+  (when-not (and (map? store)
+                 (sequential? delete)
+                 (<= (count store) maximum-pending-block-count)
+                 (<= (count delete) maximum-pending-block-count)
+                 (integer? maximum-count)
+                 (<= 0 maximum-count maximum-pending-block-count)
+                 (integer? maximum-bytes)
+                 (<= 0 maximum-bytes maximum-pending-total-bytes))
+    (fail! :bitcoin.consensus/pending-block-configuration
+           "Pending block staging bounds are invalid."
+           {:maximum-count maximum-count :maximum-bytes maximum-bytes
+            :stores (count store) :deletes (count delete)}))
+  (doseq [[hash raw] store]
+    (when-not (and (string? hash)
+                   (re-matches #"[0-9a-f]{64}" hash)
+                   (bytes? raw)
+                   (<= 81 (alength ^bytes raw)
+                       maximum-pending-block-bytes))
+      (fail! :bitcoin.consensus/pending-block
+             "Staged block is malformed or exceeds consensus size bounds."
+             {:hash hash
+              :bytes (when (bytes? raw) (alength ^bytes raw))})))
+  {:store store :delete (vec (distinct delete))
+   :maximum-count maximum-count :maximum-bytes maximum-bytes})
+
+(defn- apply-pending-blocks!
+  [connection options]
+  (let [{:keys [store delete maximum-count maximum-bytes]}
+        (validate-pending-options! options)]
+    (doseq [hash delete]
+      (execute!
+       connection
+       "DELETE FROM consensus_pending_blocks WHERE hash = ?"
+       [hash]))
+    (doseq [[hash raw] store]
+      (execute!
+       connection
+       "INSERT INTO consensus_pending_blocks(hash, raw)
+          VALUES (?, ?)
+          ON CONFLICT(hash) DO UPDATE SET
+            raw = excluded.raw, stored_at = unixepoch()"
+       [hash raw]))
+    (let [{:keys [pending-blocks pending-bytes] :as status}
+          (pending-status* connection)]
+      (when (or (> pending-blocks maximum-count)
+                (> pending-bytes maximum-bytes))
+        (fail! :bitcoin.consensus/pending-block-limit
+               "Pending side-branch staging exceeds its configured bounds."
+               (assoc status
+                      :maximum-count maximum-count
+                      :maximum-bytes maximum-bytes)))
+      status)))
+
+(declare save-host-and-headers! save-host-headers-and-pending!)
 
 (defn save-host-state!
   "Atomically update host metadata without changing the UTXO tip."
@@ -697,6 +794,13 @@
 (defn save-host-and-headers!
   "Atomically update compact host metadata and changed normalized headers."
   [backend expected-tip expected-height bytes nodes]
+  (save-host-headers-and-pending!
+   backend expected-tip expected-height bytes nodes {}))
+
+(defn save-host-headers-and-pending!
+  "Atomically update host metadata, normalized headers, and bounded staged
+  side-branch blocks. `:store` maps display hashes to raw byte arrays."
+  [backend expected-tip expected-height bytes nodes pending-options]
   (with-open [connection (connection backend)]
     (let [auto-commit (.getAutoCommit connection)]
       (try
@@ -711,6 +815,7 @@
                     :expected-height expected-height
                     :actual-height actual-height}))
           (write-header-nodes! connection nodes)
+          (apply-pending-blocks! connection pending-options)
           (write-host-state! connection bytes)
           (.commit connection)
           true)
@@ -821,7 +926,7 @@
   the freshly validated undo delta."
   [^CoinOverlay view
    {:keys [expected-tip expected-height new-tip new-height
-           detach attach host-state-bytes header-nodes]}]
+           detach attach host-state-bytes header-nodes pending-delete]}]
   (let [^Connection connection (:connection view)]
     (when @(:closed? view)
       (fail! :bitcoin.consensus/closed-utxo-view
@@ -890,6 +995,8 @@
           (put-meta! connection "tip" new-tip)
           (put-meta! connection "coin_count" next-count)
           (write-header-nodes! connection header-nodes)
+          (apply-pending-blocks!
+           connection {:delete (or pending-delete [])})
           (when host-state-bytes
             (write-host-state! connection host-state-bytes))
           (.commit connection)

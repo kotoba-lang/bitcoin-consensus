@@ -203,6 +203,45 @@
                    (sqlite/header-integrity-check! backend)
                    (catch clojure.lang.ExceptionInfo error error))))))))))
 
+(deftest pending-side-block-staging-is-atomic-and-bounded
+  (with-database
+    (fn [path]
+      (let [backend (sqlite/open {:path path :network :regtest})
+            decoded
+            (header/decode-block-header
+             (header/hex->bytes header/regtest-genesis-header-hex))
+            hash (:hash-hex decoded)
+            node
+            {:hash hash :parent nil :height 0
+             :header decoded :block nil
+             :chainwork (header/header-work (:bits decoded))
+             :undo nil :deployments {:taproot :active}
+             :active? true :header-valid? true
+             :block-valid? true :scripts-checked? true}
+            raw (byte-array (repeat 81 (unchecked-byte 1)))
+            first-host (.getBytes "first")
+            rejected-host (.getBytes "rejected")]
+        (sqlite/save-host-headers-and-pending!
+         backend nil -1 first-host [node]
+         {:store {hash raw} :maximum-count 1 :maximum-bytes 81})
+        (is (= {:pending-blocks 1 :pending-bytes 81}
+               (sqlite/pending-status backend)))
+        (is (= (seq raw) (seq (sqlite/pending-block backend hash))))
+        (is (= :bitcoin.consensus/pending-block-limit
+               (:type
+                (ex-data
+                 (try
+                   (sqlite/save-host-headers-and-pending!
+                    backend nil -1 rejected-host []
+                    {:maximum-count 0 :maximum-bytes 0})
+                   (catch clojure.lang.ExceptionInfo error error))))))
+        (is (= (seq first-host) (seq (sqlite/host-state backend))))
+        (sqlite/save-host-headers-and-pending!
+         backend nil -1 first-host [] {:delete [hash]})
+        (is (= {:pending-blocks 0 :pending-bytes 0}
+               (sqlite/pending-status backend)))
+        (is (nil? (sqlite/pending-block backend hash)))))))
+
 (deftest stale-parent-cannot-commit
   (with-database
     (fn [path]

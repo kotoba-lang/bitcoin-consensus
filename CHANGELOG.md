@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0 — 2026-07-30
+
+- Add schema-v5 bounded raw-block staging for validated side branches.
+- Atomically store or consume staged blocks with normalized headers,
+  checksummed host metadata, and UTXO reorganization commits.
+- Enforce per-block consensus serialization size, configurable aggregate
+  count/byte limits, foreign-key binding to validated headers, and rollback
+  host metadata when any staging bound fails.
+
 ## 0.10.1 — 2026-07-30
 
 - Stream full normalized-header cryptographic audits through a temporary
