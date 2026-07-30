@@ -18,6 +18,26 @@
 (def maximum-pending-block-count 4096)
 (def maximum-pending-total-bytes (* 4 1024 1024 1024))
 (def ^:private deleted ::deleted)
+(def ^:dynamic *fault-injector*
+  "Optional process-local crash-test callback. Production callers should
+  leave this nil; it cannot alter validation data or transaction ordering."
+  nil)
+
+(defn call-with-fault-injector!
+  "Run `operation` with a callback invoked at named SQLite commit boundaries.
+
+  This is intended for subprocess crash/fault tests. The callback is disabled
+  by default and does not persist in, or get loaded from, consensus storage."
+  [injector operation]
+  (when-not (and (ifn? injector) (ifn? operation))
+    (codec/fail! :bitcoin.consensus/fault-injector
+                 "Fault injector and operation must be callable." {}))
+  (binding [*fault-injector* injector]
+    (operation)))
+
+(defn- fault-point! [point]
+  (when *fault-injector*
+    (*fault-injector* point)))
 
 (def ^:private schema
   ["CREATE TABLE IF NOT EXISTS consensus_meta (
@@ -903,12 +923,17 @@
          connection
          {:block-hash block-hash :parent-hash parent-hash
           :height height :previous-height previous-height :undo undo})
+        (fault-point! :commit-block/after-undo)
         (let [next-count (utxo/coin-count view)]
           (apply-changes! connection (:changes view))
+          (fault-point! :commit-block/after-coins)
           (put-meta! connection "height" height)
           (put-meta! connection "tip" block-hash)
           (put-meta! connection "coin_count" next-count)
+          (fault-point! :commit-block/after-meta)
+          (fault-point! :commit-block/before-commit)
           (.commit connection)
+          (fault-point! :commit-block/after-commit)
           (reset! (:closed? view) true)
           {:height height :tip block-hash :coin-count next-count}))
       (catch Throwable error
@@ -983,6 +1008,7 @@
                  [(:block-hash entry) (:height entry)])
                [fork-tip fork-height] attach)
               next-count (utxo/coin-count view)]
+          (fault-point! :transition/after-undo)
           (when-not (and (= new-tip result-tip)
                          (= new-height result-height))
             (fail! :bitcoin.consensus/sqlite-reorg-tip
@@ -991,15 +1017,22 @@
                     :expected-height new-height
                     :actual-height result-height}))
           (apply-changes! connection (:changes view))
+          (fault-point! :transition/after-coins)
           (put-meta! connection "height" new-height)
           (put-meta! connection "tip" new-tip)
           (put-meta! connection "coin_count" next-count)
+          (fault-point! :transition/after-meta)
           (write-header-nodes! connection header-nodes)
+          (fault-point! :transition/after-headers)
           (apply-pending-blocks!
            connection {:delete (or pending-delete [])})
+          (fault-point! :transition/after-pending)
           (when host-state-bytes
             (write-host-state! connection host-state-bytes))
+          (fault-point! :transition/after-host)
+          (fault-point! :transition/before-commit)
           (.commit connection)
+          (fault-point! :transition/after-commit)
           (reset! (:closed? view) true)
           {:height new-height :tip new-tip :coin-count next-count
            :detached (count detach) :attached (count attach)}))

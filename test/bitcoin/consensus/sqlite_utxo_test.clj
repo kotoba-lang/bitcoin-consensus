@@ -6,7 +6,8 @@
             [clojure.test :refer [deftest is testing]]
             [kotobase.bitcoin.protocol :as header])
   (:import [java.nio.file Files Path]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file.attribute FileAttribute]
+           [java.util.concurrent TimeUnit]))
 
 (def txid-a (vec (repeat 32 1)))
 (def txid-b (vec (repeat 32 2)))
@@ -15,6 +16,15 @@
              :height 1 :coinbase? false})
 (def coin-b {:value 3000 :script-pubkey [0x00 0x14 1 2 3]
              :height 2 :coinbase? true})
+
+(defn- soak-txid [height]
+  (vec (concat (codec/uint-le height 4) (repeat 28 0))))
+
+(defn- soak-coin [height]
+  {:value (+ 1000 height)
+   :script-pubkey [0x51]
+   :height height
+   :coinbase? false})
 
 (def genesis-like-block
   {:transactions
@@ -79,6 +89,54 @@
     (try
       (run! path)
       (finally (delete-database! temporary)))))
+
+(defn- crash-process! [path fault pending-hash]
+  (let [java
+        (str (Path/of (System/getProperty "java.home")
+                      (into-array String ["bin" "java"])))
+        builder
+        (doto
+         (ProcessBuilder.
+          (into-array
+           String
+           [java "-cp" (System/getProperty "java.class.path")
+            "clojure.main" "-m"
+            "bitcoin.consensus.sqlite-crash-worker"
+            (str path) (subs (str fault) 1) pending-hash]))
+          (.redirectErrorStream true))
+        process (.start builder)
+        finished? (.waitFor process 20 TimeUnit/SECONDS)]
+    (when-not finished?
+      (.destroyForcibly process)
+      (.waitFor process 5 TimeUnit/SECONDS))
+    {:finished? finished?
+     :exit (when finished? (.exitValue process))
+     :output (slurp (.getInputStream process))}))
+
+(defn- initialize-crash-database! [path]
+  (let [backend (sqlite/open {:path path :network :regtest})
+        decoded
+        (header/decode-block-header
+         (header/hex->bytes header/regtest-genesis-header-hex))
+        hash (:hash-hex decoded)
+        node
+        {:hash hash :parent nil :height 0
+         :header decoded :block nil
+         :chainwork (header/header-work (:bits decoded))
+         :undo nil :deployments {:taproot :active}
+         :active? true :header-valid? true
+         :block-valid? true :scripts-checked? true}
+        raw (byte-array (repeat 81 (unchecked-byte 1)))]
+    (sqlite/save-host-headers-and-pending!
+     backend nil -1 (.getBytes "old-host") [node]
+     {:store {hash raw} :maximum-count 1 :maximum-bytes 81})
+    (sqlite/commit-block!
+     (-> (sqlite/begin backend)
+         (utxo/-coin-assoc [txid-a 0] coin-a))
+     {:block-hash "old" :parent-hash nil
+      :height 0 :previous-height -1
+      :undo {:height -1 :spent {} :created #{[txid-a 0]}}})
+    hash))
 
 (deftest block-commit-reopen-and-durable-disconnect
   (with-database
@@ -334,6 +392,134 @@
             (is (nil? (sqlite/undo backend "old")))
             (is (= 0 (:height (sqlite/undo backend "alternate"))))
             (is (= [1 2 3] (vec (sqlite/host-state backend))))))))))
+
+(deftest hard-process-crashes-never-publish-partial-consensus-transitions
+  (doseq [fault
+          [:transition/after-undo
+           :transition/after-coins
+           :transition/after-meta
+           :transition/after-headers
+           :transition/after-pending
+           :transition/after-host
+           :transition/before-commit
+           :transition/after-commit]]
+    (testing (str fault)
+      (with-database
+        (fn [path]
+          (let [pending-hash (initialize-crash-database! path)
+                process (crash-process! path fault pending-hash)
+                backend (sqlite/open {:path path :network :regtest})
+                committed? (= fault :transition/after-commit)]
+            (is (:finished? process) (:output process))
+            (is (= 91 (:exit process)) (:output process))
+            (is (= (if committed?
+                     {:height 1 :tip "next" :coin-count 1}
+                     {:height 0 :tip "old" :coin-count 1})
+                   (select-keys (sqlite/status backend)
+                                [:height :tip :coin-count])))
+            (is (= (if committed? coin-b coin-a)
+                   (sqlite/lookup
+                    backend [(if committed? txid-b txid-a) 0])))
+            (is (nil? (sqlite/lookup
+                       backend [(if committed? txid-a txid-b) 0])))
+            (is (some? (sqlite/undo backend "old")))
+            (is (= committed? (some? (sqlite/undo backend "next"))))
+            (is (= (if committed?
+                     {:pending-blocks 0 :pending-bytes 0}
+                     {:pending-blocks 1 :pending-bytes 81})
+                   (sqlite/pending-status backend)))
+            (is (= (seq (.getBytes (if committed? "new-host" "old-host")))
+                   (seq (sqlite/host-state backend))))
+            (is (= :ok (:integrity (sqlite/integrity-check! backend))))))))))
+
+(deftest hard-process-crashes-never-publish-partial-linear-blocks
+  (doseq [fault
+          [:commit-block/after-undo
+           :commit-block/after-coins
+           :commit-block/after-meta
+           :commit-block/before-commit
+           :commit-block/after-commit]]
+    (testing (str fault)
+      (with-database
+        (fn [path]
+          (let [_ (sqlite/open {:path path :network :regtest})
+                process (crash-process! path fault "-")
+                backend (sqlite/open {:path path :network :regtest})
+                committed? (= fault :commit-block/after-commit)]
+            (is (:finished? process) (:output process))
+            (is (= 91 (:exit process)) (:output process))
+            (is (= (if committed?
+                     {:height 0 :tip "old" :coin-count 1}
+                     {:height -1 :tip nil :coin-count 0})
+                   (select-keys (sqlite/status backend)
+                                [:height :tip :coin-count])))
+            (is (= committed?
+                   (= coin-a (sqlite/lookup backend [txid-a 0]))))
+            (is (= committed? (some? (sqlite/undo backend "old"))))
+            (is (= :ok (:integrity (sqlite/integrity-check! backend))))))))))
+
+(deftest repeated-restart-and-undo-soak-remains-exactly-reversible
+  (with-database
+    (fn [path]
+      (let [block-count 256]
+        (loop [height 0
+               backend (sqlite/open {:path path :network :regtest})]
+          (when (< height block-count)
+            (let [key [(soak-txid height) 0]
+                  previous-key
+                  (when (pos? height) [(soak-txid (dec height)) 0])
+                  view
+                  (cond-> (sqlite/begin backend)
+                    previous-key (utxo/-coin-dissoc previous-key)
+                    true (utxo/-coin-assoc key (soak-coin height)))]
+              (sqlite/commit-block!
+               view
+               {:block-hash (str "soak-" height)
+                :parent-hash (when (pos? height)
+                               (str "soak-" (dec height)))
+                :height height :previous-height (dec height)
+                :undo
+                {:height (dec height)
+                 :spent
+                 (if previous-key
+                   {previous-key (soak-coin (dec height))}
+                   {})
+                 :created #{key}}})
+              (when (zero? (mod (inc height) 32))
+                (let [reopened
+                      (sqlite/open {:path path :network :regtest})]
+                  (is (= {:height height
+                          :tip (str "soak-" height)
+                          :coin-count 1}
+                         (select-keys
+                          (sqlite/status reopened)
+                          [:height :tip :coin-count])))
+                  (is (= :ok
+                         (:integrity
+                          (sqlite/integrity-check! reopened))))))
+              (recur (inc height)
+                     (if (zero? (mod (inc height) 32))
+                       (sqlite/open {:path path :network :regtest})
+                       backend)))))
+        (loop [height (dec block-count)
+               backend (sqlite/open {:path path :network :regtest})]
+          (when-not (neg? height)
+            (sqlite/disconnect-tip! backend (str "soak-" height))
+            (when (zero? (mod (- block-count height) 32))
+              (let [reopened
+                    (sqlite/open {:path path :network :regtest})]
+                (is (= (dec height) (:height (sqlite/status reopened))))
+                (is (= :ok
+                       (:integrity (sqlite/integrity-check! reopened))))))
+            (recur (dec height)
+                   (if (zero? (mod (- block-count height) 32))
+                     (sqlite/open {:path path :network :regtest})
+                     backend))))
+        (let [reopened (sqlite/open {:path path :network :regtest})]
+          (is (= {:height -1 :tip nil :coin-count 0}
+                 (select-keys (sqlite/status reopened)
+                              [:height :tip :coin-count])))
+          (is (= :ok (:integrity (sqlite/integrity-check! reopened)))))))))
 
 (deftest consensus-transition-validates-directly-on-disk-overlay
   (with-database

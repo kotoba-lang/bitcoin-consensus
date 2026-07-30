@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.0 — 2026-07-30
+
+- Add disabled-by-default, process-local fault points around linear block and
+  multi-table fork-transition commit boundaries.
+- Verify 13 pre/post-commit hard-crash locations in separate JVMs with
+  `Runtime.halt`, then reopen and audit UTXO, undo, tip, pending block, header,
+  and host-state consistency.
+- Add a 256-block connect/restart/integrity/disconnect soak proving durable
+  undo journals return exactly to the empty genesis state.
+
 ## 0.11.0 — 2026-07-30
 
 - Add schema-v5 bounded raw-block staging for validated side branches.

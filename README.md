@@ -27,7 +27,8 @@ This repository is separate from the permanently read-only
   atomic block delta + undo commits, stale-tip rejection, restart-safe
   disconnect, multi-block reorganization + host-state commits, integrity
   checks, schema migration, normalized fixed-length header nodes, compact host
-  metadata, and O(touched outpoints) transition memory
+  metadata, disabled-by-default subprocess crash-test fault points, and
+  O(touched outpoints) transition memory
 - provably unspendable output pruning and signed transaction-version handling
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data
