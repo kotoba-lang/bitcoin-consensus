@@ -424,7 +424,32 @@
     (is (= :bitcoin.consensus/missing-witness-commitment
            (error-type
             #(block/validate-witness-commitment!
-              [(assoc-in coinbase [:outputs 0 :script-pubkey] [81])]))))))
+              [(assoc-in coinbase [:outputs 0 :script-pubkey] [81])]))))
+    (is (= :bitcoin.consensus/unexpected-witness
+           (error-type
+            #(block/validate-witness-malleation! [coinbase] false)))
+        "A valid commitment cannot authorize witness before activation")
+    (is (= 0
+           (:index
+            (block/validate-witness-malleation! [coinbase] true))))
+    (is (nil?
+         (block/validate-witness-malleation!
+          [(assoc coinbase :segwit? false :witnesses nil)] false)))))
+
+(deftest pre-segwit-block-witness-is-rejected-contextually
+  (let [genesis (block/parse (hex->bytes genesis-block-hex))
+        block-one (block/parse (hex->bytes block-one-hex))
+        witness-mutated
+        (-> block-one
+            (assoc-in [:transactions 0 :segwit?] true)
+            (assoc-in [:transactions 0 :witnesses]
+                      [[(vec (repeat 32 0))]]))
+        initial (chainstate/initialize :mainnet genesis)]
+    (is (< 1 (get-in initial [:consensus :segwit-height])))
+    (is (= :bitcoin.consensus/unexpected-witness
+           (error-type
+            #(chainstate/accept-block
+              initial witness-mutated 2000000000))))))
 
 (deftest bip143-signature-hash-matches-the-official-worked-example
   (let [value

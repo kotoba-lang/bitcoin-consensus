@@ -12,7 +12,8 @@ This repository is separate from the permanently read-only
 - unsigned 64-bit amount decoding without host integer overflow
 - txid/wtxid, exact transaction and block weight, money-range and prevout checks
 - transaction Merkle trees with CVE-2012-2459-style mutation detection
-- BIP141 witness commitment validation
+- activation-aware BIP141 witness malleation and commitment validation,
+  including pre-SegWit `unexpected-witness` rejection
 - block coinbase, duplicate transaction, and 4,000,000 weight checks
 - contextual header difficulty, PoW, linkage, MTP, future-time, testnet4
   BIP94 adjustment-boundary timewarp protection, buried BIP34/BIP66/BIP65

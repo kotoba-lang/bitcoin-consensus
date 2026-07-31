@@ -471,8 +471,8 @@
         (codec/fail! :bitcoin.consensus/non-final-transaction
                      "Block contains a non-final transaction."
                      {:height height :locktime (:locktime value)})))
-    (when (>= height segwit-height)
-      (block/validate-witness-commitment! (:transactions parsed-block)))))
+    (block/validate-witness-malleation!
+     (:transactions parsed-block) (>= height segwit-height))))
 
 (defn- common-ancestor [state left right]
   (loop [left left right right]

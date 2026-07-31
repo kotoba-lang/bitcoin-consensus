@@ -74,6 +74,22 @@
                          {:output-index (:index commitment)})))))
     commitment))
 
+(defn validate-witness-malleation!
+  "Apply Core's activation-aware witness malleation rule.
+
+  Before SegWit activation, no transaction may carry witness serialization,
+  even when the coinbase contains a syntactically valid commitment. After
+  activation, the BIP141 commitment rules apply."
+  [transactions expect-witness-commitment?]
+  (if expect-witness-commitment?
+    (validate-witness-commitment! transactions)
+    (do
+      (when (some :segwit? transactions)
+        (codec/fail! :bitcoin.consensus/unexpected-witness
+                     "Witness data is forbidden before SegWit activation."
+                     {}))
+      nil)))
+
 (defn serialize
   "Serialize a parsed block without trusting cached size or weight fields."
   [{:keys [header transactions]}]
