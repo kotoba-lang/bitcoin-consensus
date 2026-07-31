@@ -14,7 +14,7 @@
             [btc-crypto.core :as bitcoin-crypto]
             [btc-crypto.schnorr :as schnorr]
             [btc-crypto.tx :as bitcoin-tx]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [kotobase.bitcoin.protocol :as header]
             [eth-crypto.core :as eth]
             [sha256d.core :as sha256d])
@@ -1683,6 +1683,72 @@
     (is (true? (get-in reorganized
                        [:nodes (get-in b2 [:header :hash-hex]) :active?])))))
 
+(deftest invalid-high-work-branch-is-persisted-and-fork-choice-recovers
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        a1 (mine-regtest-block genesis 1 81)
+        a2 (mine-regtest-block a1 2 81)
+        invalid-coinbase
+        (transaction/parse
+         (transaction/serialize
+          (assoc-in (regtest-coinbase 1 82)
+                    [:outputs 0 :value]
+                    (inc (utxo/block-subsidy 1)))))
+        b1 (mine-regtest-block-with-coinbase genesis invalid-coinbase)
+        b2 (mine-regtest-block b1 2 82)
+        b3 (mine-regtest-block b2 3 82)
+        active
+        (-> (chainstate/initialize :regtest genesis (constantly true))
+            (chainstate/accept-block a1 2000000000 (constantly true))
+            (chainstate/accept-block a2 2000000000 (constantly true)))
+        staged
+        (-> active
+            (chainstate/accept-block b1 2000000000 (constantly true))
+            (chainstate/accept-block b2 2000000000 (constantly true)))
+        failure
+        (try
+          (chainstate/accept-block
+           staged b3 2000000000 (constantly true))
+          (catch clojure.lang.ExceptionInfo error error))
+        failed-hash (get-in b1 [:header :hash-hex])
+        marked
+        (chainstate/mark-block-invalid
+         staged failed-hash (:type (ex-data failure)))
+        restored
+        (storage/decode (storage/encode marked) :regtest)]
+    (is (chainstate/invalid-block-error? failure))
+    (is (= :bitcoin.consensus/bad-coinbase-amount
+           (:type (ex-data failure))))
+    (is (= failed-hash (:invalid-block-hash (ex-data failure)))
+        "activation identifies the earlier staged block that actually failed")
+    (is (= (:active-tip active) (:best-header marked))
+        "fork choice returns to the highest-work viable chain")
+    (is (= (:active-tip active) (:active-tip marked))
+        "failed atomic activation never disconnects the valid chain")
+    (is (= {:height 1 :reason :bitcoin.consensus/bad-coinbase-amount}
+           (get-in marked [:invalid-blocks failed-hash])))
+    (is (chainstate/block-invalid?
+         marked (get-in b2 [:header :hash-hex]))
+        "all descendants fail implicitly without an unbounded marker set")
+    (is (= marked restored)
+        "invalidity and viable best-header survive restart"))
+  (testing "known-invalid ancestry cannot consume more header or block state"
+    (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+          bad1 (mine-regtest-block genesis 1 91)
+          bad2 (mine-regtest-block bad1 2 91)
+          indexed
+          (-> (chainstate/initialize :regtest genesis (constantly true))
+              (chainstate/accept-header (:header bad1) 2000000000)
+              (chainstate/mark-block-invalid
+               (get-in bad1 [:header :hash-hex]) :test/invalid))]
+      (is (= :bitcoin.consensus/invalid-ancestor
+             (error-type
+              #(chainstate/accept-header
+                indexed (:header bad2) 2000000000))))
+      (is (= :bitcoin.consensus/known-invalid-block
+             (error-type
+              #(chainstate/accept-block
+                indexed bad1 2000000000 (constantly true))))))))
+
 (deftest chainstate-snapshot-is-atomic-checksummed-and-network-bound
   (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
         first-block (mine-regtest-block genesis 1 30)
@@ -1712,6 +1778,30 @@
         (is (= :bitcoin.consensus/corrupt-chainstate
                (error-type
                 #(storage/decode (storage/encode corrupt) :regtest)))))
+      (testing "format 2 derives branch tips and begins with no invalid roots"
+        (let [legacy
+              (-> (storage/decode-value (storage/encode state))
+                  (assoc :format 2)
+                  (dissoc :header-tips :invalid-blocks))
+              restored
+              (storage/decode (storage/encode-value legacy) :regtest)]
+          (is (= (:header-tips state) (:header-tips restored)))
+          (is (= {} (:invalid-blocks restored)))))
+      (testing "format 3 rejects forged invalid roots and branch tips"
+        (let [active-invalid
+              (assoc state :invalid-blocks
+                     {(:active-tip state)
+                      {:height 1 :reason :test/forged}})
+              missing-tip
+              (assoc state :header-tips #{})]
+          (is (= :bitcoin.consensus/corrupt-chainstate
+                 (error-type
+                  #(storage/decode
+                    (storage/encode active-invalid) :regtest))))
+          (is (= :bitcoin.consensus/corrupt-chainstate
+                 (error-type
+                  #(storage/decode
+                    (storage/encode missing-tip) :regtest))))))
       (finally
         (Files/deleteIfExists path)
         (Files/deleteIfExists directory)))))

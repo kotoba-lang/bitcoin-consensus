@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.34.0 — 2026-07-31
+
+- Persist definitive block-consensus failures as minimal invalid roots and
+  reject every known descendant through ancestry without an unbounded marker
+  set.
+- Recalculate the viable most-work header after activation failure so an
+  invalid high-work branch cannot pin block download or fork choice.
+- Preserve invalid roots and exact header leaves in chainstate format v3,
+  deriving both safely when migrating legacy formats.
+
 ## 0.33.0 — 2026-07-31
 
 - Match Core's legacy `SignatureHash` entry contract by removing only parsed

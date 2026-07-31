@@ -202,6 +202,8 @@
        :consensus (:consensus base-state)
        :active-tip hash
        :best-header hash
+       :header-tips #{hash}
+       :invalid-blocks {}
        :utxo utxo-state
        :nodes {hash {:hash hash :parent nil :height 0
                      :header actual :block genesis-block
@@ -258,6 +260,8 @@
                   (- (:timestamp parent-header) max-timewarp)}))
   candidate-header)
 
+(declare invalid-ancestor)
+
 (defn- validate-header! [state parsed-block now]
   (let [parent (parent-hash parsed-block)
         parent-node (get-in state [:nodes parent])]
@@ -265,6 +269,10 @@
       (codec/fail! :bitcoin.consensus/unknown-parent
                    "Block parent is unknown."
                    {:parent parent}))
+    (when-let [failed (invalid-ancestor state parent)]
+      (codec/fail! :bitcoin.consensus/invalid-ancestor
+                   "Block descends from a known-invalid block."
+                   {:parent parent :invalid-ancestor failed}))
     (let [context (ancestor-nodes state parent 2017)
           headers (conj (mapv :header context) (:header parsed-block))
           result
@@ -288,6 +296,131 @@
 
 (declare next-taproot-state)
 
+(defn header-tips
+  "Return the known header leaves, deriving them for pre-v3 states."
+  [state]
+  (or (:header-tips state)
+      (let [nodes (:nodes state)
+            parents (into #{} (keep (comp :parent val)) nodes)]
+        (into #{} (remove parents) (keys nodes)))))
+
+(defn invalid-blocks
+  "Return the minimal persisted set of directly failed block roots."
+  [state]
+  (or (:invalid-blocks state) {}))
+
+(defn invalid-ancestor
+  "Return the first directly invalid block on `hash` ancestry, if any."
+  [state hash]
+  (let [failed (invalid-blocks state)]
+    (loop [current hash]
+      (cond
+        (nil? current) nil
+        (contains? failed current) current
+        :else (recur (get-in state [:nodes current :parent]))))))
+
+(defn block-invalid?
+  "True when a block or one of its ancestors is permanently invalid."
+  [state hash]
+  (some? (invalid-ancestor state hash)))
+
+(defn- best-viable-header
+  [state]
+  (let [failed (invalid-blocks state)
+        candidates
+        (into
+         #{(:active-tip state)}
+         (concat
+          (header-tips state)
+          (keep #(get-in state [:nodes % :parent]) (keys failed))))
+        viable
+        (->> candidates
+             (remove nil?)
+             (remove #(block-invalid? state %))
+             sort)]
+    (when (block-invalid? state (:active-tip state))
+      (codec/fail!
+       :bitcoin.consensus/invalid-active-chain
+       "A validated active-chain block cannot be invalidated."
+       {:active-tip (:active-tip state)}))
+    (reduce
+     (fn [best hash]
+       (if (or (nil? best)
+               (header/better-chain?
+                (get-in state [:nodes hash :chainwork])
+                (get-in state [:nodes best :chainwork])))
+         hash
+         best))
+     nil
+     viable)))
+
+(defn mark-block-invalid
+  "Persist one definitive block-consensus failure and recover fork choice.
+
+  Descendants are invalid implicitly through ancestry. Redundant descendant
+  roots are removed, keeping the durable failure set minimal. An already
+  validated block, including genesis, can never be marked invalid."
+  [state hash reason]
+  (let [node (get-in state [:nodes hash])]
+    (when-not node
+      (codec/fail! :bitcoin.consensus/unknown-invalid-block
+                   "Cannot invalidate an unknown block header."
+                   {:hash hash}))
+    (when (or (nil? (:parent node)) (true? (:block-valid? node)))
+      (codec/fail! :bitcoin.consensus/validated-block-invalidation
+                   "A validated block cannot be marked invalid."
+                   {:hash hash :height (:height node)}))
+    (if (block-invalid? state hash)
+      state
+      (let [existing (invalid-blocks state)
+            retained
+            (into {}
+                  (remove
+                   (fn [[failed-hash]]
+                     (loop [current failed-hash]
+                       (cond
+                         (nil? current) false
+                         (= hash current) true
+                         :else
+                         (recur
+                          (get-in state [:nodes current :parent]))))))
+                  existing)
+            failed
+            (assoc retained hash
+                   {:height (:height node)
+                    :reason reason})
+            marked
+            (assoc state
+                   :header-tips (header-tips state)
+                   :invalid-blocks failed)
+            best (best-viable-header marked)]
+        (when-not best
+          (codec/fail! :bitcoin.consensus/no-viable-header
+                       "Block invalidation left no viable header chain."
+                       {:hash hash}))
+        (assoc marked :best-header best)))))
+
+(defn invalid-block-error?
+  "True when an exception identifies a definitive block-consensus failure."
+  [error]
+  (let [data (ex-data error)]
+    (and (string? (:invalid-block-hash data))
+         (true? (:consensus-invalid? data)))))
+
+(defn- annotate-invalid-block
+  [hash error]
+  (let [data (ex-data error)
+        type (:type data)]
+    (if (= "bitcoin.consensus" (namespace type))
+      (ex-info
+       #?(:clj (.getMessage ^Throwable error)
+          :cljs (.-message error))
+       (assoc data
+              :invalid-block-hash hash
+              :consensus-invalid? true)
+       error)
+      error)))
+
 (defn- index-valid-header
   ([state parsed-header]
    (index-valid-header state parsed-header
@@ -305,7 +438,10 @@
           :chainwork (header/add-chainwork (:chainwork parent-node) work)
           :active? false :header-valid? true
           :block-valid? false :scripts-checked? false}
-         added (assoc-in state [:nodes hash] node)
+         indexed (assoc-in state [:nodes hash] node)
+         added
+         (assoc indexed :header-tips
+                (-> (header-tips state) (disj parent) (conj hash)))
          best-work (get-in state [:nodes (:best-header state) :chainwork])]
      (if (header/better-chain? (:chainwork node) best-work)
        (assoc added :best-header hash)
@@ -582,43 +718,47 @@
     (reduce
      (fn [current-state hash]
        (let [node (get-in current-state [:nodes hash])
-             height (:height node)
-             _ (when-not (:block node)
-                 (codec/fail! :bitcoin.consensus/missing-block-data
-                              "Cannot activate a header without its block data."
-                              {:hash hash :height height}))
-             scripts-checked?
-             (assumevalid-script-check? current-state hash options)
-             verifier
-             (if scripts-checked?
-               (verifier-for current-state height hash verify-script)
-               (constantly true))
-             csv-active? (>= height
-                             (get-in current-state
-                                     [:consensus :csv-height]))
-             parent-mtp (median-time-past current-state
-                                          (:active-tip current-state))
-             {next-utxo :state undo :undo}
-             (utxo/apply-block-with-undo
-              (:utxo current-state) (:block node) height verifier
-              {:sequence-locks? csv-active?
-               :allow-bip30-overwrite?
-               (bip30-overwrite-allowed? current-state hash)
-               :halving-interval
-               (get-in current-state [:consensus :halving-interval])
-               :parent-mtp parent-mtp
-               :sigop-cost-fn
-               (sigop-counter (:consensus current-state) height hash)
-               :coin-mtp
-               #(median-time-past-at-height
-                 current-state % (:ancestor-node-at-height-fn options))})]
-         (-> current-state
-             (assoc :utxo next-utxo :active-tip hash)
-             (assoc-in [:nodes hash :undo] undo)
-             (assoc-in [:nodes hash :active?] true)
-             (assoc-in [:nodes hash :block-valid?] true)
-             (assoc-in [:nodes hash :scripts-checked?]
-                       scripts-checked?))))
+             height (:height node)]
+         (when-not (:block node)
+           (codec/fail! :bitcoin.consensus/missing-block-data
+                        "Cannot activate a header without its block data."
+                        {:hash hash :height height}))
+         (try
+           (let [
+               scripts-checked?
+               (assumevalid-script-check? current-state hash options)
+               verifier
+               (if scripts-checked?
+                 (verifier-for current-state height hash verify-script)
+                 (constantly true))
+               csv-active? (>= height
+                               (get-in current-state
+                                       [:consensus :csv-height]))
+               parent-mtp (median-time-past current-state
+                                            (:active-tip current-state))
+               {next-utxo :state undo :undo}
+               (utxo/apply-block-with-undo
+                (:utxo current-state) (:block node) height verifier
+                {:sequence-locks? csv-active?
+                 :allow-bip30-overwrite?
+                 (bip30-overwrite-allowed? current-state hash)
+                 :halving-interval
+                 (get-in current-state [:consensus :halving-interval])
+                 :parent-mtp parent-mtp
+                 :sigop-cost-fn
+                 (sigop-counter (:consensus current-state) height hash)
+                 :coin-mtp
+                 #(median-time-past-at-height
+                   current-state % (:ancestor-node-at-height-fn options))})]
+           (-> current-state
+               (assoc :utxo next-utxo :active-tip hash)
+               (assoc-in [:nodes hash :undo] undo)
+               (assoc-in [:nodes hash :active?] true)
+               (assoc-in [:nodes hash :block-valid?] true)
+               (assoc-in [:nodes hash :scripts-checked?]
+                         scripts-checked?)))
+           (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) error
+             (throw (annotate-invalid-block hash error))))))
      (assoc detached :active-tip fork) attach)))
 
 (defn accept-header
@@ -664,6 +804,10 @@
             (codec/fail! :bitcoin.consensus/unknown-parent
                          "Header batch parent is unknown."
                          {:parent parent}))
+          (when-let [failed (invalid-ancestor state parent)]
+            (codec/fail! :bitcoin.consensus/invalid-ancestor
+                         "Header batch descends from a known-invalid block."
+                         {:parent parent :invalid-ancestor failed}))
           (let [context (ancestor-nodes state parent 2017)
                 headers (into (mapv :header context) parsed-headers)
                 result
@@ -709,6 +853,10 @@
    (accept-block state parsed-block now verify-script {}))
   ([state parsed-block now verify-script options]
    (let [hash (get-in parsed-block [:header :hash-hex])]
+    (when-let [failed (invalid-ancestor state hash)]
+      (codec/fail! :bitcoin.consensus/known-invalid-block
+                   "Block belongs to a known-invalid branch."
+                   {:hash hash :invalid-ancestor failed}))
     (if (get-in state [:nodes hash :block])
       state
       (let [existing (get-in state [:nodes hash])
@@ -716,7 +864,12 @@
             (if existing
               (get-in state [:nodes (:parent existing)])
               (validate-header! state parsed-block now))
-            _ (validate-block-context! state parsed-block parent-node)
+            _
+            (try
+              (validate-block-context! state parsed-block parent-node)
+              (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default)
+                  error
+                (throw (annotate-invalid-block hash error))))
             _ (when (and existing
                          (not= (:header existing) (:header parsed-block)))
                 (codec/fail! :bitcoin.consensus/header-block-mismatch
@@ -738,8 +891,15 @@
                    (get-in parsed-block [:header :bits])))
                  :active? false :header-valid? true
                  :block-valid? false :scripts-checked? false})
+            indexed
+            (cond-> state
+              (nil? existing)
+              (assoc :header-tips
+                     (-> (header-tips state)
+                         (disj (:hash parent-node))
+                         (conj hash))))
             added
-            (cond-> (assoc-in state [:nodes hash]
+            (cond-> (assoc-in indexed [:nodes hash]
                               (assoc node :block parsed-block))
               (or (nil? (:best-header state))
                   (header/better-chain?

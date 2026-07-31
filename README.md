@@ -47,7 +47,8 @@ This repository is separate from the permanently read-only
   recovery proofs without connection-per-header amplification
 - Core-identical `OP_RETURN`/oversized-script UTXO pruning and unsigned
   32-bit transaction-version handling for CSV/BIP68
-- most-cumulative-work fork choice and tested multi-block reorganization
+- most-cumulative-work fork choice, tested multi-block reorganization, and
+  durable invalid-branch quarantine with viable-header recovery
 - headers-first synchronization that never activates missing block data
 - Bitcoin Core-exact `assumevalid` gates: assumed/best chain ancestry,
   minimum chainwork, and 256-bit `GetBlockProofEquivalentTime` rounding at

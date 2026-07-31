@@ -9,7 +9,7 @@
                           StandardOpenOption)
            (java.security MessageDigest)))
 
-(def format-version 2)
+(def format-version 3)
 
 (defn- sha256-hex [^bytes bytes]
   (let [digest (.digest (MessageDigest/getInstance "SHA-256") bytes)]
@@ -22,6 +22,8 @@
     :consensus (:consensus state)
     :active-tip (:active-tip state)
     :best-header (:best-header state)
+    :header-tips (:header-tips state)
+    :invalid-blocks (:invalid-blocks state)
     :utxo (:utxo state)
     :nodes (:nodes state)}
     (some? (:snapshot state))
@@ -55,10 +57,21 @@
                        {:hash hash}))
         (recur (:parent node) (conj result hash))))))
 
+(defn- derived-header-tips [nodes]
+  (let [parents (into #{} (keep (comp :parent val)) nodes)]
+    (into #{} (remove parents) (keys nodes))))
+
+(defn- invalid-ancestor [nodes invalid-blocks hash]
+  (loop [current hash]
+    (cond
+      (nil? current) nil
+      (contains? invalid-blocks current) current
+      :else (recur (get-in nodes [current :parent])))))
+
 (defn validate!
   "Validate structural invariants that must survive a process restart."
   [state expected-network]
-  (when-not (contains? #{1 format-version} (:format state))
+  (when-not (contains? #{1 2 format-version} (:format state))
     (codec/fail! :bitcoin.consensus/unsupported-chainstate-format
                  "Unsupported chainstate snapshot format."
                  {:format (:format state)}))
@@ -66,13 +79,22 @@
     (codec/fail! :bitcoin.consensus/chainstate-network-mismatch
                  "Chainstate belongs to a different Bitcoin network."
                  {:expected expected-network :actual (:network state)}))
-  (let [state (cond-> state
-                (= 1 (:format state))
-                (assoc :best-header (:active-tip state)))
+  (let [legacy-format (:format state)
+        nodes (:nodes state)
+        state
+        (cond-> state
+          (= 1 legacy-format)
+          (assoc :best-header (:active-tip state))
+
+          (< legacy-format 3)
+          (assoc :header-tips (derived-header-tips nodes)
+                 :invalid-blocks {}))
         nodes (:nodes state)
         path (active-path nodes (:active-tip state))
         tip (get nodes (:active-tip state))
-        best-header (get nodes (:best-header state))]
+        best-header (get nodes (:best-header state))
+        expected-tips (derived-header-tips nodes)
+        invalid-blocks (:invalid-blocks state)]
     (when-not best-header
       (codec/fail! :bitcoin.consensus/corrupt-chainstate
                    "Best header references a missing node."
@@ -82,6 +104,33 @@
                    "Best header has less work than the active tip."
                    {:active-tip (:active-tip state)
                     :best-header (:best-header state)}))
+    (when-not (= expected-tips (:header-tips state))
+      (codec/fail! :bitcoin.consensus/corrupt-chainstate
+                   "Persisted header tips do not match the node index."
+                   {:expected-count (count expected-tips)
+                    :actual-count (count (:header-tips state))}))
+    (when-not
+     (and
+      (map? invalid-blocks)
+      (every?
+       (fn [[hash {:keys [height reason]}]]
+         (let [node (get nodes hash)]
+           (and node
+                (not (contains? path hash))
+                (not (true? (:block-valid? node)))
+                (= height (:height node))
+                (keyword? reason))))
+       invalid-blocks))
+      (codec/fail! :bitcoin.consensus/corrupt-chainstate
+                   "Persisted invalid-block roots are malformed."
+                   {:count (count invalid-blocks)}))
+    (when-let [failed
+               (invalid-ancestor
+                nodes invalid-blocks (:best-header state))]
+      (codec/fail! :bitcoin.consensus/corrupt-chainstate
+                   "Best header descends from a known-invalid block."
+                   {:best-header (:best-header state)
+                    :invalid-ancestor failed}))
     (when-not (= (:height tip) (get-in state [:utxo :height]))
       (codec/fail! :bitcoin.consensus/corrupt-chainstate
                    "UTXO height differs from the active tip height."
