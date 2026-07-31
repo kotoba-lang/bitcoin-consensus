@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.32.0 — 2026-07-31
+
+- Decode transaction versions as Bitcoin Core's unsigned 32-bit wire value,
+  preserving CSV and BIP68 semantics for versions above `0x7fffffff`.
+- Implement `SCRIPT_VERIFY_CONST_SCRIPTCODE` FindAndDelete and legacy
+  `OP_CODESEPARATOR` rejection, including separators in unexecuted branches.
+- Add a permanent harness for Core v31.1 `tx_valid.json` and `tx_invalid.json`;
+  all 214 transaction vectors now pass with no skipped outcomes.
+
 ## 0.31.0 — 2026-07-31
 
 - Match Bitcoin Core's 256-bit `GetBlockProofEquivalentTime` rounding at the
@@ -268,7 +277,7 @@
 ## 0.4.2 — 2026-07-30
 
 - Validate a real SegWit wallet spend in the 103-block Core differential.
-- Decode signed transaction versions and unsigned 32-bit wire fields correctly.
+- Decode transaction versions and other unsigned 32-bit wire fields.
 
 ## 0.4.1 — 2026-07-30
 

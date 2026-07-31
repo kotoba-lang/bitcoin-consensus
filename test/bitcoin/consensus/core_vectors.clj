@@ -63,14 +63,15 @@
    "MINIMALIF" :minimal-if
    "NULLFAIL" :nullfail
    "SIGPUSHONLY" :sig-push-only
+   "CONST_SCRIPTCODE" :const-scriptcode
    "DISCOURAGE_UPGRADABLE_NOPS" :discourage-upgradable-nops
    "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"
    :discourage-upgradable-witness-program
    "TAPROOT" :taproot})
 
 (def unsupported-flags
-  #{"CONST_SCRIPTCODE" "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"
-    "DISCOURAGE_OP_SUCCESS" "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"})
+  #{"DISCOURAGE_UPGRADABLE_TAPROOT_VERSION" "DISCOURAGE_OP_SUCCESS"
+    "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"})
 
 (defn- hex-bytes [value]
   (if (empty? value)

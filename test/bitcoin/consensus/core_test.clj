@@ -279,20 +279,62 @@
                          [:outputs 0 :value]
                          (inc transaction/max-money)))))))))
 
-(deftest signed-transaction-versions-round-trip-without-enabling-bip68
-  (let [value {:version -1
+(deftest uint32-transaction-versions-enable-bip68-like-core
+  (let [value {:version 0xffffffff
                :inputs [{:txid-natural (vec (repeat 32 1))
                          :vout 0 :script-sig [] :sequence 1}]
                :outputs [{:value 1 :script-pubkey [81]}]
                :locktime 0 :segwit? false}
         parsed (transaction/parse (transaction/serialize value))]
-    (is (= -1 (:version parsed)))
+    (is (= 0xffffffff (:version parsed)))
     (is (instance? Long (get-in parsed [:inputs 0 :sequence])))
     (is (instance? Long (get-in parsed [:inputs 0 :vout])))
     (is (instance? Long (:locktime parsed)))
-    (is (= {:height -1 :time -1}
+    (is (= {:height 100 :time -1}
            (transaction/calculate-sequence-locks
             parsed [100] (constantly 0))))))
+
+(deftest core-negative-wire-version-csv-vector-remains-valid
+  (let [value
+        (transaction/parse
+         (hex->bytes
+          (str
+           "ffffffff01000100000000000000000000000000000000000000000000000000"
+           "000000000100000000030251b2010000000100000000000000000000000000")))
+        coin
+        {:value 0 :height 0 :coinbase? false
+         :script-pubkey
+         (hex->bytes
+          "a9147c17aff532f22beb54069942f9bf567a66133eaf87")}]
+    (is (= 0xffffffff (:version value)))
+    (is (true? (script/verify-input value 0 coin #{:p2sh :csv})))))
+
+(deftest const-scriptcode-rejects-find-and-delete-and-code-separator
+  (let [signature [1]
+        pubkey [2]
+        context
+        {:transaction
+         {:version 2 :locktime 0
+          :inputs [{:txid-natural (vec (repeat 32 1))
+                    :vout 0 :script-sig [] :sequence 0xffffffff}]
+          :outputs [{:value 1 :script-pubkey [0x51]}]}
+         :input-index 0
+         :coin {:value 1 :script-pubkey []}
+         :sigversion :base
+         :flags #{:const-scriptcode}}
+        signature-in-script
+        (vec (concat (script/push-data signature) [0x75 0xac]))
+        unexecuted-code-separator [0x00 0x63 0xab 0x68 0x51]]
+    (is (= :bitcoin.consensus/non-constant-scriptcode
+           (error-type
+            #(script/evaluate [signature pubkey]
+                              signature-in-script context))))
+    (is (= [[1]]
+           (script/evaluate [] unexecuted-code-separator
+                            (assoc context :flags #{}))))
+    (is (= :bitcoin.consensus/non-constant-scriptcode
+           (error-type
+            #(script/evaluate [] unexecuted-code-separator context))))))
 
 (deftest stripped-size-not-round-item-or-script-caps-bounds-transactions
   (let [input

@@ -45,8 +45,8 @@ This repository is separate from the permanently read-only
   retained-journal linkage audits
 - single-connection normalized ancestry cursors for mainnet-scale snapshot and
   recovery proofs without connection-per-header amplification
-- Core-identical `OP_RETURN`/oversized-script UTXO pruning and signed
-  transaction-version handling
+- Core-identical `OP_RETURN`/oversized-script UTXO pruning and unsigned
+  32-bit transaction-version handling for CSV/BIP68
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data
 - Bitcoin Core-exact `assumevalid` gates: assumed/best chain ancestry,
@@ -62,8 +62,9 @@ This repository is separate from the permanently read-only
 - bounded multi-peer block scheduling, response matching, timeout requeue, and
   misbehavior scoring
 - official BIP143/BIP340/BIP341 vectors, mainnet genesis/block 1 fixtures,
-  all 1,222 Bitcoin Core v31.1 Script outcomes, and mined multi-block
-  plus Core-generated AssumeUTXO regtest differential conformance
+  all 1,222 Bitcoin Core v31.1 Script outcomes, all 214 Core transaction
+  outcomes, mined multi-block validation, and Core-generated AssumeUTXO
+  regtest differential conformance
 
 ## Security boundary
 
@@ -74,11 +75,11 @@ header, coin count, and Core commitment match a pinned checkpoint; promotion
 to `:validated` additionally requires a full background chainstate match.
 
 This is still not a drop-in Bitcoin Core replacement. All 1,222 upstream Script
-vectors run in CI with exact success/failure parity, including Core-generated
-Taproot fixtures and policy flags. The mainnet-sized disk UTXO/undo backend is
-integrated by `bitcoin-node` with atomic fork-choice metadata and snapshot-start
-support. Completing a full genesis-to-tip mainnet historical differential run
-remains required.
+and all 214 transaction vectors have exact success/failure parity, including
+Core-generated Taproot fixtures and policy flags. The mainnet-sized disk
+UTXO/undo backend is integrated by `bitcoin-node` with atomic fork-choice
+metadata and snapshot-start support. Completing a full genesis-to-tip mainnet
+historical differential run remains required.
 Script, AssumeUTXO, and persistence adapters are currently JVM-only;
 wire codecs, consensus values, BIP9, headers-first state, and scheduling remain
 portable Clojure/ClojureScript values.
@@ -89,6 +90,9 @@ clojure -M:lint
 clojure -M:coverage
 ./scripts/core_regtest_differential.sh # requires bitcoind + bitcoin-cli
 ./scripts/core_script_vectors.sh       # pinned Bitcoin Core v31.1 vectors
+clojure -M:core-tx-vectors \
+  /path/to/bitcoin/src/test/data/tx_valid.json \
+  /path/to/bitcoin/src/test/data/tx_invalid.json
 
 # Resume a real Core-backed historical range from a durable kernel checkpoint:
 CONSENSUS_CORE_DATADIR=/path/to/bitcoin \

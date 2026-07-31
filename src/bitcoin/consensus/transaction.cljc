@@ -26,11 +26,6 @@
 (def sequence-locktime-mask 0x0000ffff)
 (def sequence-locktime-granularity 9)
 
-(defn- signed-int32 [value]
-  (if (>= value 0x80000000)
-    (- value 0x100000000)
-    value))
-
 (defn- read-input [bytes offset]
   (let [[txid offset] (codec/read-bytes bytes offset 32)
         [vout offset] (codec/read-uint-le bytes offset 4)
@@ -109,7 +104,7 @@
 
 (defn parse-at [bytes start]
   (let [[version offset] (codec/read-uint-le bytes start 4)
-        version (signed-int32 (long version))
+        version (long version)
         [first-count after-first] (codec/read-compact-size bytes offset)
         segwit? (and (zero? first-count)
                      (< after-first (count bytes))

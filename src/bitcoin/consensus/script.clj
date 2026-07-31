@@ -368,10 +368,15 @@
           script-code
           (if (= sigversion :witness-v0)
             subscript
-            (-> (reduce find-and-delete subscript
-                        (or (:delete-signatures context)
-                            [signature-value]))
-                remove-code-separators))
+            (let [cleaned
+                  (reduce find-and-delete subscript
+                          (or (:delete-signatures context)
+                              [signature-value]))]
+              (when (and (contains? flags :const-scriptcode)
+                         (not= cleaned subscript))
+                (fail! :bitcoin.consensus/non-constant-scriptcode
+                       "Signature was removed from legacy scriptCode." {}))
+              (remove-code-separators cleaned)))
           digest
           (if (= sigversion :witness-v0)
             (sighash/bip143 transaction input-index script-code
@@ -440,6 +445,12 @@
            (when (contains? disabled-opcodes opcode)
              (fail! :bitcoin.consensus/disabled-opcode
                     "Script contains a disabled opcode." {:opcode opcode}))
+           (when (and (= opcode op-codeseparator)
+                      (= (:sigversion context) :base)
+                      (contains? (:flags context) :const-scriptcode))
+             (fail! :bitcoin.consensus/non-constant-scriptcode
+                    "Legacy OP_CODESEPARATOR violates CONST_SCRIPTCODE."
+                    {:opcode opcode}))
            (cond
              data
              (let [minimal-push?
