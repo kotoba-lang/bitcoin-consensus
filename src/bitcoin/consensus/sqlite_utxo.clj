@@ -789,6 +789,60 @@
      []
      #(.getLong ^ResultSet % 1))))
 
+(defn header-tips
+  "Return every normalized header leaf without retaining the full graph.
+
+  This is intended for one-time migration of compact hosts that predate
+  durable leaf tracking. Parent hashes are staged in a connection-local
+  temporary table, keeping JVM memory proportional to the number of leaves."
+  [backend]
+  (with-open [^Connection connection (connection backend)]
+    (execute-statement!
+     connection
+     "CREATE TEMP TABLE consensus_header_parents (
+        hash TEXT PRIMARY KEY
+      ) WITHOUT ROWID")
+    (with-open [select
+                (.prepareStatement
+                 connection
+                 "SELECT node FROM consensus_header_nodes")
+                insert
+                (.prepareStatement
+                 connection
+                 "INSERT OR IGNORE INTO consensus_header_parents(hash)
+                    VALUES (?)")
+                result (.executeQuery select)]
+      (loop [pending 0]
+        (if (.next result)
+          (if-let [parent
+                   (:parent (decode-header-node (.getBytes result 1)))]
+            (do
+              (.setString insert 1 parent)
+              (.addBatch insert)
+              (let [pending (inc pending)]
+                (if (= 1000 pending)
+                  (do
+                    (.executeBatch insert)
+                    (.clearBatch insert)
+                    (recur 0))
+                  (recur pending))))
+            (recur pending))
+          (when (pos? pending)
+            (.executeBatch insert)))))
+    (with-open [statement
+                (.prepareStatement
+                 connection
+                 "SELECT header.hash
+                    FROM consensus_header_nodes AS header
+                    LEFT JOIN consensus_header_parents AS parent
+                      ON parent.hash = header.hash
+                   WHERE parent.hash IS NULL")
+                result (.executeQuery statement)]
+      (loop [tips #{}]
+        (if (.next result)
+          (recur (conj tips (.getString result 1)))
+          tips)))))
+
 (defn header-integrity-check!
   "Recompute every normalized header hash, parent link, height, and chainwork.
 
@@ -1029,6 +1083,20 @@
      "SELECT raw FROM consensus_pending_blocks WHERE hash = ?"
      [hash]
      #(.getBytes ^ResultSet % 1))))
+
+(defn pending-block-hashes
+  "Return the bounded set of staged side-branch block hashes."
+  [backend]
+  (with-open [connection (connection backend)
+              statement
+              (.prepareStatement
+               connection
+               "SELECT hash FROM consensus_pending_blocks")
+              result (.executeQuery statement)]
+    (loop [hashes []]
+      (if (.next result)
+        (recur (conj hashes (.getString result 1)))
+        hashes))))
 
 (defn- validate-pending-options!
   [{:keys [store delete maximum-count maximum-bytes]

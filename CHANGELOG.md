@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.34.1 — 2026-07-31
+
+- Add constant-JVM-memory normalized header-leaf discovery for one-time compact
+  host migration and bounded pending-block hash enumeration for atomic invalid
+  branch cleanup.
+
 ## 0.34.0 — 2026-07-31
 
 - Persist definitive block-consensus failures as minimal invalid roots and

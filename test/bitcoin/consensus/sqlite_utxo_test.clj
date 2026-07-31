@@ -427,6 +427,7 @@
             tip (:hash (peek nodes))]
         (sqlite/save-host-and-headers!
          backend nil -1 (.getBytes "ancestry") nodes)
+        (is (= #{tip} (sqlite/header-tips backend)))
         (is (= (:hash (first nodes))
                (sqlite/header-ancestor-hash-at-height backend tip 0)))
         (is (= (:hash (second nodes))
@@ -465,6 +466,7 @@
          {:store {hash raw} :maximum-count 1 :maximum-bytes 81})
         (is (= {:pending-blocks 1 :pending-bytes 81}
                (sqlite/pending-status backend)))
+        (is (= [hash] (sqlite/pending-block-hashes backend)))
         (is (= (seq raw) (seq (sqlite/pending-block backend hash))))
         (is (= :bitcoin.consensus/pending-block-limit
                (:type
@@ -479,6 +481,7 @@
          backend nil -1 first-host [] {:delete [hash]})
         (is (= {:pending-blocks 0 :pending-bytes 0}
                (sqlite/pending-status backend)))
+        (is (= [] (sqlite/pending-block-hashes backend)))
         (is (nil? (sqlite/pending-block backend hash)))))))
 
 (deftest stale-parent-cannot-commit
