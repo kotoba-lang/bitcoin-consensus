@@ -416,7 +416,9 @@
   #{:bitcoin.consensus/missing-witness-commitment
     :bitcoin.consensus/bad-witness-reserved-value
     :bitcoin.consensus/bad-witness-commitment
-    :bitcoin.consensus/unexpected-witness})
+    :bitcoin.consensus/unexpected-witness
+    :bitcoin.consensus/mutated-merkle-tree
+    :bitcoin.consensus/bad-merkle-root})
 
 (def ^:private local-validation-error-types
   ;; These mean the validator lacks required local state/capability. Marking
@@ -443,14 +445,18 @@
 (defn mutated-block-error?
   "True when a block body should be fetched again without invalidating its header."
   [error]
-  (= :mutated (:block-validation-result (ex-data error))))
+  (= :mutated (block-validation-result error)))
 
 (defn local-validation-error?
   "True when validation stopped because required local state was unavailable."
   [error]
   (= :local (block-validation-result error)))
 
-(defn- annotate-invalid-block
+(defn annotate-block-validation-error
+  "Attach a known block hash without collapsing mutation or local failures.
+
+  Hosts that parse a body outside `accept-block` use this same boundary before
+  making durable invalid-branch decisions."
   [hash error]
   (let [data (ex-data error)
         result (block-validation-result error)]
@@ -817,7 +823,7 @@
                (assoc-in [:nodes hash :scripts-checked?]
                          scripts-checked?)))
            (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) error
-             (throw (annotate-invalid-block hash error))))))
+             (throw (annotate-block-validation-error hash error))))))
      (assoc detached :active-tip fork) attach)))
 
 (defn accept-header
@@ -928,7 +934,7 @@
               (validate-block-context! state parsed-block parent-node)
               (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default)
                   error
-                (throw (annotate-invalid-block hash error))))
+                (throw (annotate-block-validation-error hash error))))
             _ (when (and existing
                          (not= (:header existing) (:header parsed-block)))
                 (codec/fail! :bitcoin.consensus/header-block-mismatch

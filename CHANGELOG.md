@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.35.1 — 2026-07-31
+
+- Match Core's `BLOCK_MUTATED` result for mismatched and ambiguous transaction
+  Merkle trees, allowing another copy of the body without poisoning its header.
+- Apply Merkle mutation/root checks before transaction-body consensus checks,
+  matching Core's validation-result precedence for malleated block copies.
+- Expose one validation-error annotation boundary for hosts that parse block
+  bodies before entering the pure chainstate transition.
+
 ## 0.35.0 — 2026-07-31
 
 - Match Core's `BLOCK_MUTATED` boundary for witness malleation failures so a

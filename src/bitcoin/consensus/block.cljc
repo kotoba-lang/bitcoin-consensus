@@ -120,8 +120,6 @@
             [result offset]
             (let [[value next-offset] (transaction/parse-at bytes offset)]
               (recur (inc index) next-offset (conj result value)))))
-        _ (doseq [transaction transactions]
-            (transaction/validate-context-free! transaction))
         _ (when-not (= offset (count bytes))
             (codec/fail! :bitcoin.consensus/trailing-data
                          "Block has trailing data."
@@ -132,6 +130,17 @@
         total-size (+ prefix-size
                       (reduce + 0 (map :total-size transactions)))
         weight (+ (* 3 base-size) total-size)
+        txids (mapv :txid-natural transactions)
+        merkle (merkle-root txids)
+        _ (when (:mutated? merkle)
+            (codec/fail! :bitcoin.consensus/mutated-merkle-tree
+                         "Block has an ambiguous Merkle tree." {}))
+        _ (when-not (= (:root merkle) (:merkle-root decoded-header))
+            (codec/fail! :bitcoin.consensus/bad-merkle-root
+                         "Block header Merkle root does not match transactions."
+                         {}))
+        _ (doseq [transaction transactions]
+            (transaction/validate-context-free! transaction))
         _ (when (> weight max-block-weight)
             (codec/fail! :bitcoin.consensus/block-weight
                          "Block exceeds MAX_BLOCK_WEIGHT."
@@ -142,18 +151,9 @@
         _ (when (some transaction/coinbase? (rest transactions))
             (codec/fail! :bitcoin.consensus/multiple-coinbase
                          "Block contains more than one coinbase." {}))
-        txids (mapv :txid-natural transactions)
         _ (when-not (= (count txids) (count (set txids)))
             (codec/fail! :bitcoin.consensus/duplicate-transaction
-                         "Block contains duplicate transaction IDs." {}))
-        merkle (merkle-root txids)
-        _ (when (:mutated? merkle)
-            (codec/fail! :bitcoin.consensus/mutated-merkle-tree
-                         "Block has an ambiguous Merkle tree." {}))
-        _ (when-not (= (:root merkle) (:merkle-root decoded-header))
-            (codec/fail! :bitcoin.consensus/bad-merkle-root
-                         "Block header Merkle root does not match transactions."
-                         {}))]
+                         "Block contains duplicate transaction IDs." {}))]
     {:header decoded-header
      :transactions transactions
      :transaction-count transaction-count

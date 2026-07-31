@@ -458,6 +458,16 @@
     (is (= :bitcoin.consensus/trailing-data
            (error-type #(block/parse (conj raw 0)))))))
 
+(deftest merkle-mutation-precedes-body-consensus-errors-like-core
+  (let [parsed (block/parse (hex->bytes genesis-block-hex))
+        transaction-raw (get-in parsed [:transactions 0 :raw])
+        ambiguous
+        (vec (concat (get-in parsed [:header :bytes])
+                     [2] transaction-raw transaction-raw))]
+    (is (= :bitcoin.consensus/mutated-merkle-tree
+           (error-type #(block/parse ambiguous)))
+        "Merkle ambiguity wins before duplicate/multiple-coinbase checks")))
+
 (deftest bip141-witness-commitment-is-validated
   (let [reserved (vec (repeat 32 0))
         commitment
@@ -524,6 +534,16 @@
              (:block-hash (ex-data error)))))))
 
 (deftest block-validation-outcome-separates-local-state-from-consensus
+  (doseq [type [:bitcoin.consensus/mutated-merkle-tree
+                :bitcoin.consensus/bad-merkle-root]]
+    (let [error (ex-info "malleated block body" {:type type})
+          annotated
+          (chainstate/annotate-block-validation-error "block-hash" error)]
+      (is (= :mutated (chainstate/block-validation-result error)))
+      (is (chainstate/mutated-block-error? error))
+      (is (chainstate/mutated-block-error? annotated))
+      (is (= "block-hash" (:block-hash (ex-data annotated))))
+      (is (nil? (:invalid-block-hash (ex-data annotated))))))
   (doseq [type
           [:bitcoin.consensus/missing-script-verifier
            :bitcoin.consensus/missing-locktime-ancestor
