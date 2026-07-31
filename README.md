@@ -91,6 +91,7 @@ portable Clojure/ClojureScript values.
 clojure -M:test
 clojure -M:lint
 clojure -M:coverage
+clojure -M:fuzz 21000000 5000     # replayable 15,000-target CI corpus
 ./scripts/core_regtest_differential.sh # requires bitcoind + bitcoin-cli
 ./scripts/core_script_vectors.sh       # all pinned Core v31.1 corpora
 clojure -M:core-tx-vectors \
@@ -112,3 +113,9 @@ CONSENSUS_DIFFERENTIAL_BLOCKS=1003 \
 CONSENSUS_RESTART_INTERVAL=250 \
 ./scripts/core_regtest_differential.sh
 ```
+
+The fuzz runner bounds inputs to 4,096 bytes and iterations to 1,000,000,
+prints the exact seed, rejects host exceptions or untyped failures, and checks
+canonical transaction/block/Script raw round trips. CI replays one seed with a
+90-second process deadline; the scheduled workflow runs four larger seeds with
+independent five-minute deadlines.

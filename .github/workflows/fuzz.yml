@@ -1,0 +1,24 @@
+name: Consensus fuzz
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [0, 21000000, 2147483647, 4294967295]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeLaGuardo/setup-clojure@13.6.1
+        with:
+          cli: latest
+      - name: Fuzz wire and Script boundaries
+        run: timeout 300s clojure -M:fuzz ${{ matrix.seed }} 100000

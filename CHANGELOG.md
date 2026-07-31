@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.38.0 — 2026-07-31
+
+- Add a deterministic, seed-replayable, structure-biased fuzz harness for
+  transaction, block, legacy Script, and tapscript decoding/execution.
+- Require canonical raw round trips, namespaced typed failures, bounded input
+  and iteration counts, and an outer process timeout so host exceptions and
+  hangs fail CI with replay evidence.
+- Run 15,000 target cases on every change and four 300,000-case seeds nightly.
+
 ## 0.37.0 — 2026-07-31
 
 - Implement Bitcoin Core's policy-only Taproot forward-compatibility flags for

@@ -3,6 +3,7 @@
             [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
+            [bitcoin.consensus.fuzz :as fuzz]
             [bitcoin.consensus.sighash :as sighash]
             [bitcoin.consensus.signet :as signet]
             [bitcoin.consensus.script :as script]
@@ -2178,3 +2179,8 @@
            false
            (catch clojure.lang.ExceptionInfo _ true))
          (str "mutated genesis byte " index " must fail closed"))))))
+
+(deftest deterministic-consensus-fuzz-smoke-is-replayable
+  (is (= {:schema fuzz/schema :seed 21000000 :iterations 25
+          :target-cases 75 :result :passed}
+         (fuzz/run! 21000000 25))))

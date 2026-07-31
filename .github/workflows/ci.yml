@@ -16,3 +16,5 @@ jobs:
       - run: clojure -M:lint
       - run: clojure -M:coverage
       - run: ./scripts/core_script_vectors.sh
+      - name: Replay bounded consensus fuzz seed
+        run: timeout 90s clojure -M:fuzz 21000000 5000
