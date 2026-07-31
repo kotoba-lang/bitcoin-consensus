@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.22.0 — 2026-07-31
+
+- Match Bitcoin Core `CScript::IsUnspendable` by excluding output scripts above
+  10,000 bytes from the UTXO set as well as outputs beginning with `OP_RETURN`.
+- Keep large output scripts consensus-valid when created while preventing UTXO
+  hash divergence, snapshot incompatibility, and false BIP30 overwrite
+  rejections.
+- Migrate schema-v6 databases transactionally by pruning legacy unspendable
+  coins, audit current/undo rows, and require authenticated reindex if undo
+  proves an impossible spend was previously accepted.
+
 ## 0.21.0 — 2026-07-31
 
 - Replace the round 100,000 witness-item decoder cap with the exact

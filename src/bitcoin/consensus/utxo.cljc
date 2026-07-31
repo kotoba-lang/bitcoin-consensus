@@ -8,6 +8,7 @@
 (def initial-subsidy 5000000000)
 (def halving-interval 210000)
 (def max-block-sigop-cost 80000)
+(def max-script-size 10000)
 
 (defprotocol CoinStore
   "Persistent-map semantics required by consensus. Implementations may return
@@ -81,7 +82,9 @@
     [(update state :coins coin-dissoc key) (:value coin)]))
 
 (defn- provably-unspendable? [output]
-  (= 0x6a (first (:script-pubkey output))))
+  (let [script-pubkey (:script-pubkey output)]
+    (or (= 0x6a (first script-pubkey))
+        (> (count script-pubkey) max-script-size))))
 
 (defn- add-outputs
   [state transaction height coinbase? allow-overwrite?]

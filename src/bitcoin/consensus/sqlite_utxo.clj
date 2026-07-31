@@ -13,7 +13,7 @@
            [javax.sql DataSource]
            [org.sqlite SQLiteDataSource]))
 
-(def schema-version 6)
+(def schema-version 7)
 (def maximum-pending-block-bytes 4000000)
 (def maximum-pending-block-count 4096)
 (def maximum-pending-total-bytes (* 4 1024 1024 1024))
@@ -229,6 +229,52 @@
           floor (if earliest (dec earliest) height)]
       (put-meta! connection "undo_prune_height" (max -1 floor)))))
 
+(def ^:private unspendable-script-sql
+  "(length(script) > 10000 OR
+    (length(script) > 0 AND substr(script, 1, 1) = X'6A'))")
+
+(defn- unspendable-row-count
+  [^Connection connection table where-prefix]
+  (first-row
+   connection
+   (str "SELECT count(*) FROM " table " WHERE " where-prefix
+        unspendable-script-sql)
+   []
+   #(.getLong ^ResultSet % 1)))
+
+(defn- migrate-unspendable-coins!
+  "Repair schema <=6 databases produced before oversized scripts matched
+  Core's CScript::IsUnspendable rule. A spent unspendable coin in undo proves
+  that an impossible spend was accepted, so that case fails closed to reindex."
+  [^Connection connection stored-version]
+  (when (and stored-version (< (parse-long stored-version) 7))
+    (let [auto-commit (.getAutoCommit connection)]
+      (try
+        (.setAutoCommit connection false)
+        (let [bad-undo
+              (unspendable-row-count
+               connection "consensus_undo" "kind = 0 AND ")]
+          (when (pos? bad-undo)
+            (fail! :bitcoin.consensus/sqlite-unspendable-undo
+                   "Undo history contains a spent provably unspendable output."
+                   {:rows bad-undo
+                    :recovery :reindex-from-authenticated-history})))
+        (execute!
+         connection
+         (str "DELETE FROM consensus_coins WHERE " unspendable-script-sql)
+         [])
+        (let [actual
+              (first-row connection "SELECT count(*) FROM consensus_coins" []
+                         #(.getLong ^ResultSet % 1))]
+          (put-meta! connection "coin_count" actual)
+          (put-meta! connection "schema_version" schema-version))
+        (.commit connection)
+        (catch Throwable error
+          (.rollback connection)
+          (throw error))
+        (finally
+          (.setAutoCommit connection auto-commit))))))
+
 (defn open
   "Open or initialize a network-bound UTXO database."
   [{:keys [path datasource network busy-timeout-ms]
@@ -253,7 +299,7 @@
       (let [stored-version (meta-value connection "schema_version")
             stored-network (meta-value connection "network")]
         (when (and stored-version
-                   (not (contains? #{1 2 3 4 5 schema-version}
+                   (not (contains? (set (range 1 (inc schema-version)))
                                    (parse-long stored-version))))
           (fail! :bitcoin.consensus/sqlite-schema
                  "Unsupported SQLite UTXO schema."
@@ -265,6 +311,7 @@
           (fail! :bitcoin.consensus/sqlite-network-mismatch
                  "SQLite UTXO database belongs to another network."
                  {:expected network :actual stored-network}))
+        (migrate-unspendable-coins! connection stored-version)
         (put-meta! connection "schema_version" schema-version)
         (put-meta! connection "network" (name network))
         (when-not (meta-value connection "height")
@@ -1435,6 +1482,11 @@
           actual
           (first-row connection "SELECT count(*) FROM consensus_coins" []
                      #(.getLong ^ResultSet % 1))
+          unspendable-coins
+          (unspendable-row-count connection "consensus_coins" "")
+          unspendable-undo
+          (unspendable-row-count
+           connection "consensus_undo" "kind = 0 AND ")
           claimed (parse-long (meta-value connection "coin_count"))]
       (when-not (= "ok" integrity)
         (fail! :bitcoin.consensus/sqlite-corrupt
@@ -1443,6 +1495,11 @@
         (fail! :bitcoin.consensus/sqlite-count-mismatch
                "SQLite UTXO metadata count is inconsistent."
                {:expected claimed :actual actual}))
+      (when (or (pos? unspendable-coins) (pos? unspendable-undo))
+        (fail! :bitcoin.consensus/sqlite-unspendable-output
+               "SQLite state contains a provably unspendable output."
+               {:coins unspendable-coins :undo unspendable-undo
+                :recovery :reindex-from-authenticated-history}))
       (merge {:integrity :ok :coin-count actual}
              (undo-integrity-check! connection)
              (header-integrity-check! backend)))))

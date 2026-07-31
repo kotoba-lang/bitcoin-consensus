@@ -722,7 +722,7 @@
     (is (= utxo/empty-state
            (utxo/disconnect-block (:state transition) (:undo transition))))))
 
-(deftest bip30-exceptions-are-explicit-and-op-return-is-not-stored
+(deftest bip30-exceptions-are-explicit-and-unspendable-outputs-are-not-stored
   (let [txid (vec (repeat 32 21))
         coinbase
         {:txid-natural txid
@@ -752,6 +752,20 @@
            (assoc-in block [:transactions 0 :outputs 0 :script-pubkey]
                      [0x6a 1 1])
            1 (constantly true)))))
+    (let [large-script-block
+          (assoc-in block [:transactions 0 :outputs 0 :script-pubkey]
+                    (vec (repeat 10001 0)))
+          first-state
+          (utxo/apply-block utxo/empty-state large-script-block 1
+                            (constantly true))
+          repeated-state
+          (utxo/apply-block first-state large-script-block 2
+                            (constantly true))]
+      (is (= 10000 utxo/max-script-size))
+      (is (empty? (:coins first-state))
+          "Core prunes scriptPubKeys above MAX_SCRIPT_SIZE when created")
+      (is (empty? (:coins repeated-state))
+          "A pruned output cannot cause a false BIP30 overwrite rejection"))
     (is (= 2 (count chainstate/bip30-repeat-blocks)))))
 
 (deftest chainstate-connects-real-block-one-by-most-work

@@ -209,6 +209,59 @@
                      (sqlite/open {:path path :network :testnet})
                      (catch clojure.lang.ExceptionInfo error error)))))))))))
 
+(deftest schema-seven-prunes-legacy-unspendable-coins
+  (with-database
+    (fn [path]
+      (sqlite/open {:path path :network :regtest})
+      (with-open [connection (.getConnection (sqlite/datasource path))
+                  statement (.createStatement connection)]
+        (.executeUpdate
+         statement
+         "UPDATE consensus_meta SET value = '6'
+            WHERE key = 'schema_version'")
+        (.executeUpdate
+         statement
+         "INSERT INTO consensus_coins
+            (txid, vout, value, script, height, coinbase)
+          VALUES (zeroblob(32), 0, 1, zeroblob(10001), 0, 0)"))
+      (let [reopened (sqlite/open {:path path :network :regtest})]
+        (is (= 7 sqlite/schema-version))
+        (is (= 0 (:coin-count (sqlite/status reopened))))
+        (is (nil? (sqlite/lookup reopened [(vec (repeat 32 0)) 0])))
+        (is (= :ok (:integrity (sqlite/integrity-check! reopened))))))))
+
+(deftest schema-seven-fails-closed-on-spent-unspendable-undo
+  (with-database
+    (fn [path]
+      (sqlite/open {:path path :network :regtest})
+      (with-open [connection (.getConnection (sqlite/datasource path))
+                  statement (.createStatement connection)]
+        (.executeUpdate
+         statement
+         "UPDATE consensus_meta SET value = '6'
+            WHERE key = 'schema_version'")
+        (.executeUpdate
+         statement
+         "INSERT INTO consensus_undo_blocks
+            (block_hash, parent_hash, height, previous_height)
+          VALUES ('invalid-spend', NULL, 0, -1)")
+        (.executeUpdate
+         statement
+         "INSERT INTO consensus_undo
+            (block_hash, sequence, kind, txid, vout, value, script,
+             height, coinbase)
+          VALUES
+            ('invalid-spend', 0, 0, zeroblob(32), 0, 1,
+             zeroblob(10001), 0, 0)"))
+      (let [error
+            (try
+              (sqlite/open {:path path :network :regtest})
+              (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= :bitcoin.consensus/sqlite-unspendable-undo
+               (:type (ex-data error))))
+        (is (= :reindex-from-authenticated-history
+               (:recovery (ex-data error))))))))
+
 (deftest undo-pruning-is-bounded-monotonic-and-explicit-about-recovery
   (with-database
     (fn [path]
