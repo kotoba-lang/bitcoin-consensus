@@ -406,20 +406,78 @@
   [error]
   (let [data (ex-data error)]
     (and (string? (:invalid-block-hash data))
+         (= :invalid (:block-validation-result data))
          (true? (:consensus-invalid? data)))))
+
+(def ^:private mutated-block-error-types
+  ;; Core reports every CheckWitnessMalleation failure as BLOCK_MUTATED. Such
+  ;; a body may be transport-corrupted or malleated and must not poison the
+  ;; otherwise valid header hash permanently.
+  #{:bitcoin.consensus/missing-witness-commitment
+    :bitcoin.consensus/bad-witness-reserved-value
+    :bitcoin.consensus/bad-witness-commitment
+    :bitcoin.consensus/unexpected-witness})
+
+(def ^:private local-validation-error-types
+  ;; These mean the validator lacks required local state/capability. Marking
+  ;; the remote branch invalid would turn disk damage or host configuration
+  ;; into a persistent consensus decision.
+  #{:bitcoin.consensus/missing-script-verifier
+    :bitcoin.consensus/missing-locktime-ancestor
+    :bitcoin.consensus/unknown-bip30-block})
+
+(defn block-validation-result
+  "Classify an ExceptionInfo at the block-index failure boundary.
+
+  `:invalid` is a definitive consensus failure, `:mutated` is a retryable body
+  failure that must not poison its header, `:local` requires host recovery,
+  and `:unknown` is outside the consensus error vocabulary."
+  [error]
+  (let [type (:type (ex-data error))]
+    (cond
+      (contains? mutated-block-error-types type) :mutated
+      (contains? local-validation-error-types type) :local
+      (= "bitcoin.consensus" (namespace type)) :invalid
+      :else :unknown)))
+
+(defn mutated-block-error?
+  "True when a block body should be fetched again without invalidating its header."
+  [error]
+  (= :mutated (:block-validation-result (ex-data error))))
+
+(defn local-validation-error?
+  "True when validation stopped because required local state was unavailable."
+  [error]
+  (= :local (block-validation-result error)))
 
 (defn- annotate-invalid-block
   [hash error]
   (let [data (ex-data error)
-        type (:type data)]
-    (if (= "bitcoin.consensus" (namespace type))
+        result (block-validation-result error)]
+    (case result
+      :invalid
       (ex-info
        #?(:clj (.getMessage ^Throwable error)
           :cljs (.-message error))
        (assoc data
+              :block-hash hash
               :invalid-block-hash hash
+              :block-validation-result :invalid
               :consensus-invalid? true)
        error)
+
+      :mutated
+      (ex-info
+       #?(:clj (.getMessage ^Throwable error)
+          :cljs (.-message error))
+       (assoc data
+              :block-hash hash
+              :block-validation-result :mutated
+              :retryable? true)
+       error)
+
+      ;; Local and unknown exceptions retain their original data. Callers can
+      ;; recover the host without attributing a consensus failure to a branch.
       error)))
 
 (defn- index-valid-header

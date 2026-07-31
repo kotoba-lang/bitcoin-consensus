@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.35.0 — 2026-07-31
+
+- Match Core's `BLOCK_MUTATED` boundary for witness malleation failures so a
+  corrupted or malleated body is retried without permanently poisoning its
+  otherwise valid header.
+- Separate definitive consensus failures from missing local ancestry,
+  verifier capability, and internal block-index state before durable branch
+  invalidation.
+
 ## 0.34.3 — 2026-07-31
 
 - Add disabled-by-default hard-crash boundaries around compact host metadata

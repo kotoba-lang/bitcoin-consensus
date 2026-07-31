@@ -511,10 +511,34 @@
                       [[(vec (repeat 32 0))]]))
         initial (chainstate/initialize :mainnet genesis)]
     (is (< 1 (get-in initial [:consensus :segwit-height])))
-    (is (= :bitcoin.consensus/unexpected-witness
-           (error-type
-            #(chainstate/accept-block
-              initial witness-mutated 2000000000))))))
+    (let [error
+          (try
+            (chainstate/accept-block
+             initial witness-mutated 2000000000)
+            (catch clojure.lang.ExceptionInfo value value))]
+      (is (= :bitcoin.consensus/unexpected-witness
+             (:type (ex-data error))))
+      (is (chainstate/mutated-block-error? error))
+      (is (false? (chainstate/invalid-block-error? error)))
+      (is (= (get-in block-one [:header :hash-hex])
+             (:block-hash (ex-data error)))))))
+
+(deftest block-validation-outcome-separates-local-state-from-consensus
+  (doseq [type
+          [:bitcoin.consensus/missing-script-verifier
+           :bitcoin.consensus/missing-locktime-ancestor
+           :bitcoin.consensus/unknown-bip30-block]]
+    (let [error (ex-info "local validation dependency" {:type type})]
+      (is (= :local (chainstate/block-validation-result error)))
+      (is (chainstate/local-validation-error? error))
+      (is (false? (chainstate/invalid-block-error? error)))))
+  (is (= :unknown
+         (chainstate/block-validation-result
+          (ex-info "storage I/O" {:type :host/io-failure}))))
+  (is (= :invalid
+         (chainstate/block-validation-result
+          (ex-info "bad subsidy"
+                   {:type :bitcoin.consensus/bad-coinbase-amount})))))
 
 (deftest bip143-signature-hash-matches-the-official-worked-example
   (let [value
