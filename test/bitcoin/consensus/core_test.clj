@@ -309,6 +309,14 @@
     (is (= 0xffffffff (:version value)))
     (is (true? (script/verify-input value 0 coin #{:p2sh :csv})))))
 
+(deftest legacy-sighash-removes-only-parsed-code-separators
+  (is (= [0x02 0xab 0x51]
+         (sighash/legacy-script-code [0xab 0x02 0xab 0x51])))
+  (is (= [0x02 0xab 0x51 0x4c 0x02]
+         (sighash/legacy-script-code
+          [0xab 0x02 0xab 0x51 0x4c 0x02 0xab]))
+      "Core stops after the malformed push length, before its remaining data"))
+
 (deftest const-scriptcode-rejects-find-and-delete-and-code-separator
   (let [signature [1]
         pubkey [2]

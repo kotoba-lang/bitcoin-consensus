@@ -263,11 +263,6 @@
         (.digest (MessageDigest/getInstance "SHA-1")
                  (byte-array (map unchecked-byte value)))))
 
-(defn- remove-code-separators [script]
-  (vec (mapcat :raw
-               (remove #(= op-codeseparator (:opcode %))
-                       (parse script)))))
-
 (defn- find-and-delete [script signature-value]
   (let [target (push-data signature-value)]
     (vec
@@ -376,7 +371,7 @@
                          (not= cleaned subscript))
                 (fail! :bitcoin.consensus/non-constant-scriptcode
                        "Signature was removed from legacy scriptCode." {}))
-              (remove-code-separators cleaned)))
+              cleaned))
           digest
           (if (= sigversion :witness-v0)
             (sighash/bip143 transaction input-index script-code

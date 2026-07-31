@@ -34,4 +34,8 @@
   :core-tx-vectors
   {:extra-paths ["test"]
    :extra-deps {org.clojure/data.json {:mvn/version "2.5.1"}}
-   :main-opts ["-m" "bitcoin.consensus.core-tx-vectors"]}}}
+   :main-opts ["-m" "bitcoin.consensus.core-tx-vectors"]}
+  :core-sighash-vectors
+  {:extra-paths ["test"]
+   :extra-deps {org.clojure/data.json {:mvn/version "2.5.1"}}
+   :main-opts ["-m" "bitcoin.consensus.core-sighash-vectors"]}}}

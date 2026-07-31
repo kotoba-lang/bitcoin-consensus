@@ -8,6 +8,10 @@
 (def zero-hash (vec (repeat 32 0)))
 (def one-hash (into [1] (repeat 31 0)))
 (def uint64-max 0xffffffffffffffffN)
+(def ^:private op-pushdata1 0x4c)
+(def ^:private op-pushdata2 0x4d)
+(def ^:private op-pushdata4 0x4e)
+(def ^:private op-codeseparator 0xab)
 
 (defn- digest [bytes]
   (vec (sha256d/sha256d-bytes (vec bytes))))
@@ -31,11 +35,107 @@
 (defn- output-bytes [output]
   (transaction/serialize-output output))
 
+(defn- uint-le-at [script offset length]
+  (when (<= (+ offset length) (count script))
+    [(reduce
+      (fn [result index]
+        (+ result
+           (* (nth script (+ offset index))
+              (reduce * 1 (repeat index 256)))))
+      0N (range length))
+     (+ offset length)]))
+
+(defn- read-script-op [script offset]
+  (if (>= offset (count script))
+    {:valid? false :end offset}
+    (let [opcode (long (nth script offset))
+          after-opcode (inc offset)
+          length-result
+          (cond
+            (<= 0 opcode 75) [opcode after-opcode]
+            (= opcode op-pushdata1) (uint-le-at script after-opcode 1)
+            (= opcode op-pushdata2) (uint-le-at script after-opcode 2)
+            (= opcode op-pushdata4) (uint-le-at script after-opcode 4)
+            :else [0 after-opcode])]
+      (if-not length-result
+        {:valid? false :end after-opcode}
+        (let [[length after-length] length-result
+              end (+ after-length length)]
+          (if (<= end (count script))
+            {:valid? true :opcode opcode :end (long end)}
+            {:valid? false :end after-length}))))))
+
+(defn- legacy-script-code-parts [script-code]
+  (let [script-code (vec script-code)
+        separator-count
+        (loop [offset 0 total 0]
+          (if (= offset (count script-code))
+            total
+            (let [{:keys [valid? opcode end]}
+                  (read-script-op script-code offset)]
+              (if valid?
+                (recur end
+                       (if (= opcode op-codeseparator)
+                         (inc total)
+                         total))
+                total))))
+        bytes
+        (loop [offset 0 segment-start 0 result []]
+          (if (= offset (count script-code))
+            (into (vec result) (subvec script-code segment-start))
+            (let [{:keys [valid? opcode end]}
+                  (read-script-op script-code offset)]
+              (cond
+                (not valid?)
+                (into (vec result)
+                      (subvec script-code segment-start end))
+
+                (= opcode op-codeseparator)
+                (recur end end
+                       (into result
+                             (subvec script-code segment-start (dec end))))
+
+                :else
+                (recur end segment-start result)))))]
+    {:length (- (count script-code) separator-count)
+     :bytes (vec bytes)}))
+
+(defn legacy-script-code
+  "Remove opcode-level OP_CODESEPARATOR bytes exactly as Core's legacy
+  SignatureHash serializer does. Bytes equal to 0xab inside pushed data remain
+  committed. For a malformed trailing push, the returned payload stops where
+  Core's parser stopped; `legacy` separately preserves Core's declared length."
+  [script-code]
+  (:bytes (legacy-script-code-parts script-code)))
+
+(defn- serialize-legacy-transaction
+  [value inputs outputs selected-input script-code]
+  (vec
+   (concat
+    (codec/uint-le (:version value) 4)
+    (codec/compact-size (count inputs))
+    (mapcat
+     (fn [index input]
+       (let [{:keys [length bytes]}
+             (if (= index selected-input)
+               script-code
+               {:length 0 :bytes []})]
+         (concat
+          (outpoint-bytes input)
+          (codec/compact-size length) bytes
+          (sequence-bytes input))))
+     (range) inputs)
+    (codec/compact-size (count outputs))
+    (mapcat output-bytes outputs)
+    (codec/uint-le (:locktime value) 4))))
+
 (defn legacy
-  "Pre-SegWit SignatureHash. `script-code` must already have OP_CODESEPARATOR
-  removed according to the executing script's rules."
+  "Pre-SegWit SignatureHash with Core-identical OP_CODESEPARATOR removal.
+  The caller remains responsible for selecting the subscript after the last
+  executed separator and legacy FindAndDelete of signatures."
   [value input-index script-code hash-type]
-  (let [base-type (bit-and hash-type 0x1f)
+  (let [script-code (legacy-script-code-parts script-code)
+        base-type (bit-and hash-type 0x1f)
         anyone-can-pay?
         (not (zero? (bit-and hash-type signature/sighash-anyonecanpay)))]
     (if (and (= base-type signature/sighash-single)
@@ -69,10 +169,10 @@
                           {:value uint64-max :script-pubkey []}))
                  [(nth (:outputs value) input-index)])
               (:outputs value))
+            selected-input (if anyone-can-pay? 0 input-index)
             serialized
-            (transaction/serialize
-             (assoc value :inputs inputs :outputs outputs
-                    :witnesses nil :segwit? false))]
+            (serialize-legacy-transaction
+             value inputs outputs selected-input script-code)]
         (digest (concat serialized (codec/uint-le hash-type 4)))))))
 
 (defn bip143

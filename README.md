@@ -63,8 +63,8 @@ This repository is separate from the permanently read-only
   misbehavior scoring
 - official BIP143/BIP340/BIP341 vectors, mainnet genesis/block 1 fixtures,
   all 1,222 Bitcoin Core v31.1 Script outcomes, all 214 Core transaction
-  outcomes, mined multi-block validation, and Core-generated AssumeUTXO
-  regtest differential conformance
+  outcomes, all 500 Core legacy sighash outcomes, mined multi-block
+  validation, and Core-generated AssumeUTXO regtest differential conformance
 
 ## Security boundary
 
@@ -74,12 +74,12 @@ snapshots are activated only after their network, independently validated base
 header, coin count, and Core commitment match a pinned checkpoint; promotion
 to `:validated` additionally requires a full background chainstate match.
 
-This is still not a drop-in Bitcoin Core replacement. All 1,222 upstream Script
-and all 214 transaction vectors have exact success/failure parity, including
-Core-generated Taproot fixtures and policy flags. The mainnet-sized disk
-UTXO/undo backend is integrated by `bitcoin-node` with atomic fork-choice
-metadata and snapshot-start support. Completing a full genesis-to-tip mainnet
-historical differential run remains required.
+This is still not a drop-in Bitcoin Core replacement. All 1,222 upstream
+Script, all 214 transaction, and all 500 legacy sighash vectors run in CI with
+exact parity, including Core-generated Taproot fixtures and policy flags. The
+mainnet-sized disk UTXO/undo backend is integrated by `bitcoin-node` with atomic
+fork-choice metadata and snapshot-start support. Completing a full
+genesis-to-tip mainnet historical differential run remains required.
 Script, AssumeUTXO, and persistence adapters are currently JVM-only;
 wire codecs, consensus values, BIP9, headers-first state, and scheduling remain
 portable Clojure/ClojureScript values.
@@ -89,10 +89,12 @@ clojure -M:test
 clojure -M:lint
 clojure -M:coverage
 ./scripts/core_regtest_differential.sh # requires bitcoind + bitcoin-cli
-./scripts/core_script_vectors.sh       # pinned Bitcoin Core v31.1 vectors
+./scripts/core_script_vectors.sh       # all pinned Core v31.1 corpora
 clojure -M:core-tx-vectors \
   /path/to/bitcoin/src/test/data/tx_valid.json \
   /path/to/bitcoin/src/test/data/tx_invalid.json
+clojure -M:core-sighash-vectors \
+  /path/to/bitcoin/src/test/data/sighash.json
 
 # Resume a real Core-backed historical range from a durable kernel checkpoint:
 CONSENSUS_CORE_DATADIR=/path/to/bitcoin \

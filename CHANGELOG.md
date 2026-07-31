@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.33.0 — 2026-07-31
+
+- Match Core's legacy `SignatureHash` entry contract by removing only parsed
+  `OP_CODESEPARATOR` opcodes while retaining identical bytes inside push data
+  and preserving its parser-stop plus declared-length behavior for malformed
+  trailing pushes.
+- Add all 500 Core v31.1 legacy sighash outcomes to the permanent conformance
+  harness with zero failures.
+- Run SHA-256-pinned Script, transaction, and sighash corpora in CI: 1,936
+  upstream outcomes with no skipped vectors.
+
 ## 0.32.0 — 2026-07-31
 
 - Decode transaction versions as Bitcoin Core's unsigned 32-bit wire value,
