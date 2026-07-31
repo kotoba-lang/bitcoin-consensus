@@ -1291,8 +1291,14 @@
            (versionbits/next-state deployment 8 :started 300 2)))
     (is (= :active
            (versionbits/next-state deployment 12 :locked-in 400 0)))
-    (is (= :failed
+    (is (= :started
            (versionbits/next-state deployment 4 :defined 1000 4)))
+    (is (= :locked-in
+           (versionbits/next-state deployment 8 :started 1000 3))
+        "Core gives a reached threshold precedence over timeout")
+    (is (= :failed
+           (versionbits/next-state deployment 8 :started 1000 2))
+        "Core fails a timed-out STARTED period only below threshold")
     (is (versionbits/signals? 0x20000004 2))
     (is (not (versionbits/signals? 0x00000004 2)))))
 

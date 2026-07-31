@@ -27,7 +27,8 @@ This repository is separate from the permanently read-only
 - Core-identical BIP30 collision gating: coinbase replacement at the two
   historical repeats and below height 1,983,702 on pinned BIP34 chains;
   non-coinbase UTXO overwrites remain forbidden in every block
-- BIP9 versionbits state transitions and network-specific buried deployments
+- Core-ordered BIP9 versionbits transitions, including start/timeout and
+  threshold/timeout precedence, plus network-specific buried deployments
 - early `CheckBlock`-equivalent legacy sigop rejection plus full
   legacy/P2SH/witness accounting with the 80,000 block-cost limit
 - transaction finality plus BIP34/BIP113 and relative lock-time validation

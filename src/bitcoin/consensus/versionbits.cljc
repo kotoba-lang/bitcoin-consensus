@@ -23,15 +23,12 @@
     parent-state
     (case parent-state
       :defined
-      (cond
-        (>= parent-mtp timeout) :failed
-        (>= parent-mtp start-time) :started
-        :else :defined)
+      (if (>= parent-mtp start-time) :started :defined)
 
       :started
       (cond
-        (>= parent-mtp timeout) :failed
         (>= signal-count threshold) :locked-in
+        (>= parent-mtp timeout) :failed
         :else :started)
 
       :locked-in
