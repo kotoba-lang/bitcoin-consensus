@@ -17,6 +17,8 @@
 
 (def consensus-parameters
   {:mainnet {:bip34-height 227931
+             :bip34-hash
+             "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8"
              :bip65-height 388381
              :bip66-height 363725
              :csv-height 419328
@@ -38,6 +40,8 @@
               "0000000000000000000f14c35b2d841e986ab5441de8c585d5ffe55ea1e395ad"
               #{:p2sh :witness}}}
    :testnet {:bip34-height 21111
+             :bip34-hash
+             "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8"
              :bip65-height 581885
              :bip66-height 330776
              :csv-height 770112
@@ -107,6 +111,8 @@
 (def bip30-repeat-blocks
   #{"00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec"
     "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721"})
+
+(def bip30-recheck-height 1983702)
 
 (defn script-flags
   "Bitcoin Core block-consensus Script flags for a known block.
@@ -353,6 +359,32 @@
         (< (:height node) height) nil
         :else (recur (:parent node))))))
 
+(defn bip30-overwrite-allowed?
+  "Whether Core skips its BIP30 UTXO collision scan for `block-hash`.
+
+  Coinbase outputs may overwrite only while that scan is skipped. Core skips
+  it for the two historical repeat blocks and, below height 1,983,702, for
+  descendants of the network's pinned BIP34 activation block. The activation
+  block itself is still checked because Core queries its parent ancestry.
+  Networks without a pinned BIP34 hash never receive this optimization."
+  [state block-hash]
+  (let [node (get-in state [:nodes block-hash])
+        _ (when-not node
+            (codec/fail! :bitcoin.consensus/unknown-bip30-block
+                         "BIP30 policy requires an indexed block."
+                         {:hash block-hash}))
+        height (:height node)
+        {:keys [bip34-height bip34-hash]} (:consensus state)
+        bip34-ancestor
+        (when (and bip34-hash (:parent node))
+          (ancestor-at-height state (:parent node) bip34-height))
+        known-bip34-chain?
+        (and bip34-ancestor (= bip34-hash (:hash bip34-ancestor)))]
+    (boolean
+     (and (< height bip30-recheck-height)
+          (or (contains? bip30-repeat-blocks block-hash)
+              known-bip34-chain?)))))
+
 (defn- subtract-chainwork [left right]
   (loop [index 31 result (vec (repeat 32 0)) borrow 0]
     (if (neg? index)
@@ -539,7 +571,7 @@
               (:utxo current-state) (:block node) height verifier
               {:sequence-locks? csv-active?
                :allow-bip30-overwrite?
-               (contains? bip30-repeat-blocks hash)
+               (bip30-overwrite-allowed? current-state hash)
                :halving-interval
                (get-in current-state [:consensus :halving-interval])
                :parent-mtp parent-mtp

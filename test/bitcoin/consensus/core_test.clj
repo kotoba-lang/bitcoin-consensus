@@ -880,6 +880,100 @@
           "A pruned output cannot cause a false BIP30 overwrite rejection"))
     (is (= 2 (count chainstate/bip30-repeat-blocks)))))
 
+(deftest bip30-gating-matches-core-bip34-anchor-and-recheck-boundaries
+  (let [parameters (:mainnet chainstate/consensus-parameters)
+        activation-hash (:bip34-hash parameters)
+        repeat-hash (first chainstate/bip30-repeat-blocks)
+        state
+        {:consensus parameters
+         :nodes
+         {"pre-activation" {:hash "pre-activation" :height 227930
+                            :parent nil}
+          activation-hash {:hash activation-hash :height 227931
+                           :parent "pre-activation"}
+          "known-child" {:hash "known-child" :height 227932
+                         :parent activation-hash}
+          "alternate-activation" {:hash "alternate-activation"
+                                  :height 227931
+                                  :parent "pre-activation"}
+          "alternate-child" {:hash "alternate-child" :height 227932
+                             :parent "alternate-activation"}
+          "before-recheck" {:hash "before-recheck" :height 1983701
+                            :parent activation-hash}
+          "recheck" {:hash "recheck"
+                     :height chainstate/bip30-recheck-height
+                     :parent "before-recheck"}
+          repeat-hash {:hash repeat-hash :height 91842 :parent nil}}}]
+    (is (= 1983702 chainstate/bip30-recheck-height))
+    (is (false?
+         (chainstate/bip30-overwrite-allowed? state activation-hash))
+        "Core checks the BIP34 activation block against its parent view")
+    (is (true?
+         (chainstate/bip30-overwrite-allowed? state "known-child"))
+        "Core skips BIP30 below the recheck height on the pinned BIP34 chain")
+    (is (false?
+         (chainstate/bip30-overwrite-allowed? state "alternate-child"))
+        "an alternate BIP34 activation hash must retain BIP30 checking")
+    (is (true?
+         (chainstate/bip30-overwrite-allowed? state repeat-hash))
+        "the historical duplicate coinbase blocks remain explicit exceptions")
+    (is (true?
+         (chainstate/bip30-overwrite-allowed? state "before-recheck")))
+    (is (false?
+         (chainstate/bip30-overwrite-allowed? state "recheck"))
+        "Core resumes BIP30 checking at height 1,983,702")
+    (is (= :bitcoin.consensus/unknown-bip30-block
+           (error-type
+            #(chainstate/bip30-overwrite-allowed? state "missing"))))
+    (is (false?
+         (chainstate/bip30-overwrite-allowed?
+          {:consensus (:regtest chainstate/consensus-parameters)
+           :nodes {"regtest-child" {:hash "regtest-child"
+                                    :height 2 :parent nil}}}
+          "regtest-child"))
+        "networks without a pinned BIP34 hash never receive the shortcut")))
+
+(deftest bip30-scan-uses-the-unmodified-parent-utxo-view
+  (let [colliding-id (vec (repeat 32 31))
+        source-id (vec (repeat 32 32))
+        first-id (vec (repeat 32 33))
+        coinbase
+        {:txid-natural (vec (repeat 32 34))
+         :inputs [{:txid-natural (vec (repeat 32 0))
+                   :vout 0xffffffff :script-sig [1 1]
+                   :sequence 0xffffffff}]
+         :outputs [{:value 0 :script-pubkey [81]}]}
+        spend-collision
+        {:txid-natural first-id
+         :inputs [{:txid-natural colliding-id :vout 0
+                   :script-sig [] :sequence 0xffffffff}]
+         :outputs [{:value 1 :script-pubkey [81]}]}
+        recreate-collision
+        {:txid-natural colliding-id
+         :inputs [{:txid-natural source-id :vout 0
+                   :script-sig [] :sequence 0xffffffff}]
+         :outputs [{:value 1 :script-pubkey [81]}]}
+        state
+        {:height 0
+         :coins
+         {[colliding-id 0] {:value 1 :script-pubkey [81]
+                            :height 0 :coinbase? false}
+          [source-id 0] {:value 1 :script-pubkey [81]
+                         :height 0 :coinbase? false}}}
+        candidate
+        {:transactions [coinbase spend-collision recreate-collision]}]
+    (is (= :bitcoin.consensus/overwrite-unspent
+           (error-type
+            #(utxo/apply-block state candidate 1 (constantly true))))
+        "spending a collision earlier in the block cannot bypass Core's scan")
+    (is (= 1
+           (get-in
+            (utxo/apply-block
+             state candidate 1 (constantly true)
+             {:allow-bip30-overwrite? true})
+            [:coins [colliding-id 0] :value]))
+        "when Core skips the scan, sequential connection may recreate it")))
+
 (deftest chainstate-connects-real-block-one-by-most-work
   (let [genesis (block/parse (hex->bytes genesis-block-hex))
         block-one (block/parse (hex->bytes block-one-hex))

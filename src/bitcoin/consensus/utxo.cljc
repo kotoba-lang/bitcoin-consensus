@@ -112,6 +112,18 @@
                  (assoc output :height height :coinbase? coinbase?)))))
    state (vec (:outputs transaction))))
 
+(defn- validate-bip30-collisions!
+  [state transactions]
+  (doseq [transaction transactions
+          [index output] (map-indexed vector (:outputs transaction))
+          :when (not (provably-unspendable? output))]
+    (let [key (outpoint-key (:txid-natural transaction) index)]
+      (when (coin-contains? (:coins state) key)
+        (codec/fail! :bitcoin.consensus/overwrite-unspent
+                     "Block would overwrite an initially unspent output."
+                     {:outpoint key}))))
+  state)
+
 (defn- validate-sequence-locks!
   [state transaction height {:keys [sequence-locks? coin-mtp parent-mtp]}]
   (when sequence-locks?
@@ -166,6 +178,10 @@
      (codec/fail! :bitcoin.consensus/missing-script-verifier
                   "A script verifier is required." {}))
    (let [transactions (:transactions block)
+        _ (when-not (:allow-bip30-overwrite? options)
+            ;; ConnectBlock performs BIP30 against the unmodified parent view,
+            ;; before any transaction in this block can spend a collision.
+            (validate-bip30-collisions! state transactions))
         coinbase (first transactions)
         initial-sigops
         (add-sigop-cost! 0 state coinbase (:sigop-cost-fn options))

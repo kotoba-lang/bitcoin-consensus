@@ -24,8 +24,9 @@ This repository is separate from the permanently read-only
 - legacy, BIP143, and BIP341/342 sighash plus ECDSA/BIP340 Schnorr verification
 - Core-retroactive P2SH/WITNESS/TAPROOT flags plus historical
   lax-DER/BIP66, CLTV, CSV/BIP68, BIP147, Taproot, and BIP30 exceptions
-- coinbase-only historical BIP30 replacement; non-coinbase UTXO overwrites
-  remain forbidden in every block
+- Core-identical BIP30 collision gating: coinbase replacement at the two
+  historical repeats and below height 1,983,702 on pinned BIP34 chains;
+  non-coinbase UTXO overwrites remain forbidden in every block
 - BIP9 versionbits state transitions and network-specific buried deployments
 - early `CheckBlock`-equivalent legacy sigop rejection plus full
   legacy/P2SH/witness accounting with the 80,000 block-cost limit
