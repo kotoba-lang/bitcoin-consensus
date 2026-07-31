@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.20.0 — 2026-07-31
+
+- Enforce Bitcoin Core's one-million-byte stripped transaction limit directly
+  for standalone and block transaction decoding.
+- Replace round input/output caps with exact size-derived maxima, admitting
+  100,001 through 111,105 minimal outputs that the former cap rejected.
+- Decode output scripts above 10,000 bytes when the transaction remains within
+  its consensus size bound; Script execution retains its separate limit.
+
 ## 0.19.0 — 2026-07-31
 
 - Reject obsolete block-header versions at the exact buried BIP34, BIP66, and

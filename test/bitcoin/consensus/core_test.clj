@@ -279,6 +279,63 @@
            (transaction/calculate-sequence-locks
             parsed [100] (constantly 0))))))
 
+(deftest stripped-size-not-round-item-or-script-caps-bounds-transactions
+  (let [input
+        (vec
+         (concat
+          (repeat 32 1)
+          (codec/uint-le 0 4)
+          [0]
+          (codec/uint-le 0xffffffff 4)))
+        output (vec (concat (codec/uint-le 0 8) [0]))
+        raw
+        (fn [output-count]
+          (vec
+           (concat
+            (codec/uint-le 1 4)
+            [1] input
+            (codec/compact-size output-count)
+            (mapcat identity (repeat output-count output))
+            (codec/uint-le 0 4))))]
+    (is (= 24389 transaction/max-inputs))
+    (is (= 111105 transaction/max-outputs))
+    (let [parsed (transaction/parse (raw 100001))]
+      (is (= 100001 (count (:outputs parsed))))
+      (is (<= (:base-size parsed)
+              transaction/max-transaction-base-bytes)))
+    (is (= :bitcoin.consensus/resource-limit
+           (error-type #(transaction/parse (raw 111106)))))
+    (let [oversized-script (vec (repeat 999950 0))]
+      (is (= :bitcoin.consensus/oversized-transaction
+             (error-type
+              #(transaction/parse
+                (transaction/serialize
+                 {:version 1
+                  :inputs [{:txid-natural (vec (repeat 32 1))
+                            :vout 0 :script-sig oversized-script
+                            :sequence 0xffffffff}]
+                  :outputs [{:value 0 :script-pubkey []}]
+                  :locktime 0}))))))
+    (is (= :bitcoin.consensus/oversized-transaction
+           (error-type
+            #(transaction/validate-context-free!
+              {:version 1
+               :inputs [{:txid-natural (vec (repeat 32 1))
+                         :vout 0 :script-sig [] :sequence 0xffffffff}]
+               :outputs [{:value 0 :script-pubkey []}]
+               :locktime 0
+               :base-size 1000001}))))
+    (let [large-script (vec (repeat 10001 0x6a))
+          parsed
+          (transaction/parse
+           (transaction/serialize
+            {:version 1
+             :inputs [{:txid-natural (vec (repeat 32 1))
+                       :vout 0 :script-sig [] :sequence 0xffffffff}]
+             :outputs [{:value 0 :script-pubkey large-script}]
+             :locktime 0}))]
+      (is (= large-script (get-in parsed [:outputs 0 :script-pubkey]))))))
+
 (deftest context-free-transaction-and-finality-rules-fail-closed
   (let [input {:txid-natural (vec (repeat 32 3))
                :vout 0 :script-sig [] :sequence 0}

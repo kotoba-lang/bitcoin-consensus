@@ -4,9 +4,15 @@
             [sha256d.core :as sha256d]))
 
 (def max-money 2100000000000000)
-(def max-script-bytes 10000)
-(def max-inputs 100000)
-(def max-outputs 100000)
+(def max-transaction-base-bytes 1000000)
+;; Script execution has a 10,000-byte limit, but CheckTransaction does not:
+;; an oversized output script is consensus-valid when created and simply
+;; unspendable through legacy/witness-v0 execution. Decode up to the enclosing
+;; stripped transaction limit and leave execution limits to the Script VM.
+(def max-script-bytes max-transaction-base-bytes)
+;; These maxima are derived from Core's stripped transaction size rule.
+(def max-inputs 24389)
+(def max-outputs 111105)
 (def max-witness-items 100000)
 (def max-witness-item-bytes 4000000)
 (def locktime-threshold 500000000)
@@ -137,6 +143,11 @@
         transaction {:version version :inputs inputs :outputs outputs
                      :witnesses witnesses :locktime locktime :segwit? segwit?}
         stripped (serialize transaction false)
+        _ (when (> (count stripped) max-transaction-base-bytes)
+            (codec/fail! :bitcoin.consensus/oversized-transaction
+                         "Stripped transaction exceeds the consensus limit."
+                         {:size (count stripped)
+                          :limit max-transaction-base-bytes}))
         full (subvec bytes start end)]
     [(assoc transaction
             :raw full :stripped stripped
@@ -169,8 +180,13 @@
   "Apply Bitcoin Core's transaction checks that do not need a UTXO view."
   [transaction]
   (let [inputs (:inputs transaction)
+        base-size (:base-size transaction)
         total-output (output-value transaction)
         outpoints (mapv (juxt :txid-natural :vout) inputs)]
+    (when (and base-size (> base-size max-transaction-base-bytes))
+      (codec/fail! :bitcoin.consensus/oversized-transaction
+                   "Stripped transaction exceeds the consensus limit."
+                   {:size base-size :limit max-transaction-base-bytes}))
     (when (> total-output max-money)
       (codec/fail! :bitcoin.consensus/amount-out-of-range
                    "Transaction output total exceeds MAX_MONEY."
