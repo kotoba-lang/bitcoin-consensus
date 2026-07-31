@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.19.0 — 2026-07-31
+
+- Reject obsolete block-header versions at the exact buried BIP34, BIP66, and
+  BIP65 activation heights, matching Bitcoin Core contextual header rules.
+- Apply the same fail-closed deployment boundary checks to sequential and
+  atomic batch header synchronization.
+
 ## 0.18.0 — 2026-07-31
 
 - Let authenticated snapshot hosts retain a lazy normalized node map while

@@ -211,6 +211,24 @@
       (let [node (get-in state [:nodes hash])]
         (recur (:parent node) (dec remaining) (conj newest node))))))
 
+(defn- validate-buried-header-version!
+  [{:keys [bip34-height bip66-height bip65-height]} height header]
+  (let [version (:version header)
+        [minimum deployment activation-height]
+        (cond
+          (>= height bip65-height) [4 :bip65 bip65-height]
+          (>= height bip66-height) [3 :bip66 bip66-height]
+          (>= height bip34-height) [2 :bip34 bip34-height]
+          :else [nil nil nil])]
+    (when (and minimum (< version minimum))
+      (codec/fail! :bitcoin.consensus/obsolete-block-version
+                   "Block version predates an active buried deployment."
+                   {:height height
+                    :version version
+                    :minimum minimum
+                    :deployment deployment
+                    :activation-height activation-height}))))
+
 (defn- validate-header! [state parsed-block now]
   (let [parent (parent-hash parsed-block)
         parent-node (get-in state [:nodes parent])]
@@ -231,6 +249,9 @@
         (codec/fail! :bitcoin.consensus/invalid-header
                      "Block header failed contextual consensus."
                      {:errors (:errors result)}))
+      (validate-buried-header-version!
+       (:consensus state) (inc (:height parent-node))
+       (:header parsed-block))
       parent-node)))
 
 (declare next-taproot-state)
@@ -563,6 +584,11 @@
               (codec/fail! :bitcoin.consensus/invalid-header
                            "Header batch failed contextual consensus."
                            {:errors (:errors result)}))
+            (doseq [[index parsed-header] (map-indexed vector parsed-headers)]
+              (validate-buried-header-version!
+               (:consensus state)
+               (+ (:height parent-node) index 1)
+               parsed-header))
             (first
              (reduce
               (fn [[current work-cache] parsed-header]

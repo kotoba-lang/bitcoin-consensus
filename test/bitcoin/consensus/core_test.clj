@@ -177,21 +177,24 @@
      :locktime 0
      :segwit? false})))
 
-(defn mine-regtest-block [parent height branch]
-  (let [coinbase (regtest-coinbase height branch)
-        template {:version 1
-                  :prev-block (get-in parent [:header :hash])
-                  :merkle-root (:txid-natural coinbase)
-                  :timestamp (inc (get-in parent [:header :timestamp]))
-                  :bits 0x207fffff}]
-    (loop [nonce 0]
-      (let [header-bytes (header/encode-block-header
-                          (assoc template :nonce nonce))
-            decoded (header/decode-block-header header-bytes)]
-        (if (header/hash-meets-target? (:hash decoded) (:bits decoded))
-          (block/parse
-           (vec (concat header-bytes [1] (:raw coinbase))))
-          (recur (inc nonce)))))))
+(defn mine-regtest-block
+  ([parent height branch]
+   (mine-regtest-block parent height branch 4))
+  ([parent height branch version]
+   (let [coinbase (regtest-coinbase height branch)
+         template {:version version
+                   :prev-block (get-in parent [:header :hash])
+                   :merkle-root (:txid-natural coinbase)
+                   :timestamp (inc (get-in parent [:header :timestamp]))
+                   :bits 0x207fffff}]
+     (loop [nonce 0]
+       (let [header-bytes (header/encode-block-header
+                           (assoc template :nonce nonce))
+             decoded (header/decode-block-header header-bytes)]
+         (if (header/hash-meets-target? (:hash decoded) (:bits decoded))
+           (block/parse
+            (vec (concat header-bytes [1] (:raw coinbase))))
+           (recur (inc nonce))))))))
 
 (deftest parses-and-validates-the-real-genesis-block
   (let [parsed (block/parse (hex->bytes genesis-block-hex))
@@ -774,6 +777,51 @@
            (error-type
             #(chainstate/accept-headers
               batch [(:header first-block)] 2000000000))))))
+
+(deftest buried-deployments-reject-obsolete-header-versions
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        initial
+        (assoc (chainstate/initialize :regtest genesis (constantly true))
+               :consensus
+               (assoc (:regtest chainstate/consensus-parameters)
+                      :bip34-height 1
+                      :bip66-height 2
+                      :bip65-height 3))
+        obsolete-bip34 (mine-regtest-block genesis 1 61 1)
+        bip34 (mine-regtest-block genesis 1 62 2)
+        at-bip34
+        (chainstate/accept-header
+         initial (:header bip34) 2000000000)
+        obsolete-bip66 (mine-regtest-block bip34 2 62 2)
+        bip66 (mine-regtest-block bip34 2 63 3)
+        at-bip66
+        (chainstate/accept-header
+         at-bip34 (:header bip66) 2000000000)
+        obsolete-bip65 (mine-regtest-block bip66 3 63 3)
+        bip65 (mine-regtest-block bip66 3 64 4)]
+    (doseq [[state candidate expected-deployment expected-minimum]
+            [[initial obsolete-bip34 :bip34 2]
+             [at-bip34 obsolete-bip66 :bip66 3]
+             [at-bip66 obsolete-bip65 :bip65 4]]]
+      (let [error
+            (try
+              (chainstate/accept-header
+               state (:header candidate) 2000000000)
+              nil
+              (catch clojure.lang.ExceptionInfo exception exception))]
+        (is (= :bitcoin.consensus/obsolete-block-version
+               (:type (ex-data error))))
+        (is (= expected-deployment (:deployment (ex-data error))))
+        (is (= expected-minimum (:minimum (ex-data error))))))
+    (is (= 3
+           (get-in
+            (chainstate/accept-header
+             at-bip66 (:header bip65) 2000000000)
+            [:nodes (get-in bip65 [:header :hash-hex]) :height])))
+    (is (= :bitcoin.consensus/obsolete-block-version
+           (error-type
+            #(chainstate/accept-headers
+              initial [(:header obsolete-bip34)] 2000000000))))))
 
 (deftest assumevalid-skips-only-buried-best-header-chain-scripts
   (let [work (header/header-work 0x207fffff)
