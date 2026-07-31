@@ -319,6 +319,13 @@
   (when (and (= sigversion :tapscript) (empty? pubkey))
     (fail! :bitcoin.consensus/tapscript-pubkey
            "Tapscript public key is empty." {}))
+  (when (and (= sigversion :tapscript)
+             (seq pubkey)
+             (not= 32 (count pubkey))
+             (contains? flags :discourage-upgradable-pubkeytype))
+    (fail! :bitcoin.consensus/discouraged-tapscript-pubkeytype
+           "Upgradable tapscript public-key type is discouraged."
+           {:size (count pubkey)}))
   (if (empty? signature-value)
     false
     (if (= sigversion :tapscript)
@@ -421,8 +428,14 @@
          operations (parse script {:unbounded-script? tapscript?
                                    :unbounded-elements? tapscript?})
          minimal? (contains? (:flags context) :minimal-data)]
-     (if (and tapscript? (some #(op-success? (:opcode %)) operations))
-       [[1]]
+     (if-let [success-op
+              (when tapscript?
+                (some #(when (op-success? (:opcode %)) %) operations))]
+       (if (contains? (:flags context) :discourage-op-success)
+         (fail! :bitcoin.consensus/discouraged-op-success
+                "Tapscript OP_SUCCESS is discouraged."
+                {:opcode (:opcode success-op)})
+         [[1]])
        (do
          (when (some #(and (:data %) (> (count (:data %)) max-element-size))
                      operations)
@@ -1109,7 +1122,7 @@
        :tapleaf-hash (tapleaf-hash leaf-version tapscript)})))
 
 (defn- verify-taproot!
-  [transaction input-index witness public-key]
+  [transaction input-index witness public-key flags]
   (when (empty? witness)
     (fail! :bitcoin.consensus/taproot-witness-empty
            "Taproot witness is empty." {}))
@@ -1158,7 +1171,11 @@
           ;; Unknown leaf versions are forward-compatible after commitment
           ;; validation. Leaf 0xc0 executes BIP342 tapscript.
           (if (not= leaf-version 0xc0)
-            true
+            (if (contains? flags :discourage-upgradable-taproot-version)
+              (fail! :bitcoin.consensus/discouraged-taproot-version
+                     "Upgradable Taproot leaf version is discouraged."
+                     {:leaf-version leaf-version})
+              true)
             (do
               (when (some #(> (count %) max-element-size) initial-stack)
                 (fail! :bitcoin.consensus/push-size
@@ -1168,7 +1185,7 @@
                 initial-stack tapscript
                 {:transaction transaction :input-index input-index
                  :coin (nth (:prevout-coins transaction) input-index)
-                 :sigversion :tapscript :flags #{}
+                 :sigversion :tapscript :flags flags
                  :annex annex :tapleaf-hash tapleaf-hash
                  :validation-weight-left validation-weight-left})
                true))))))))
@@ -1179,7 +1196,7 @@
     (and (= version 1) (= 32 (count program))
          (contains? flags :taproot))
     (verify-taproot!
-     transaction input-index (vec witness) program)
+     transaction input-index (vec witness) program flags)
 
     (not= version 0)
     ;; Unknown witness versions are anyone-can-spend until a soft fork.

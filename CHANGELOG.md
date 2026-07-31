@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.37.0 — 2026-07-31
+
+- Implement Bitcoin Core's policy-only Taproot forward-compatibility flags for
+  unknown leaf versions, `OP_SUCCESS`, and upgradable tapscript public-key
+  types without changing block-consensus acceptance.
+- Pass the complete caller flag set through Taproot script-path execution and
+  remove the final explicitly unsupported Core Script-vector flags.
+
 ## 0.36.0 — 2026-07-31
 
 - Classify pruned/missing undo, missing staged bodies, SQLite ancestry and

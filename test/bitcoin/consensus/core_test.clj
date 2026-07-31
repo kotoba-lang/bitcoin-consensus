@@ -1637,11 +1637,66 @@
     (is (script/verify-input
          success-transaction 0 success-coin
          #{:p2sh :witness :taproot}))
+    (is (= :bitcoin.consensus/discouraged-op-success
+           (error-type
+            #(script/verify-input
+              success-transaction 0 success-coin
+              #{:p2sh :witness :taproot :discourage-op-success}))))
     (is (= :bitcoin.consensus/push-size
            (error-type
             #(script/verify-input
               failure-transaction 0 failure-coin
               #{:p2sh :witness :taproot}))))))
+
+(deftest taproot-forward-compatible-surfaces-have-explicit-policy-flags
+  (let [context
+        {:transaction {:version 2 :locktime 0
+                       :inputs [{:sequence 0xffffffff}]
+                       :outputs []}
+         :input-index 0 :coin {:value 0 :script-pubkey []}
+         :sigversion :tapscript :flags #{}}
+        signature (vec (repeat 64 1))
+        unknown-pubkey (vec (repeat 33 2))]
+    (is (= [[1]]
+           (script/evaluate [signature unknown-pubkey]
+                            [script/op-checksig] context)))
+    (is (= :bitcoin.consensus/discouraged-tapscript-pubkeytype
+           (error-type
+            #(script/evaluate
+              [signature unknown-pubkey] [script/op-checksig]
+              (assoc context :flags
+                     #{:discourage-upgradable-pubkeytype}))))))
+  (let [internal
+        (hex->bytes
+         "d6889cb081036e0faefa3a35157ad71086b123b2b144b649798b494c300a961d")
+        leaf-version 0xc2
+        tapscript [0x51]
+        leaf-hash
+        (schnorr/tagged-hash
+         "TapLeaf"
+         (concat [leaf-version] (codec/compact-size (count tapscript))
+                 tapscript))
+        tweaked (schnorr/tweak-public-key internal leaf-hash)
+        control
+        (vec (concat [(+ leaf-version (:parity tweaked))] internal))
+        coin {:value 1000
+              :script-pubkey
+              (vec (concat [0x51 0x20] (:x tweaked)))}
+        transaction
+        {:version 2
+         :inputs [{:txid-natural (vec (repeat 32 4))
+                   :vout 0 :script-sig [] :sequence 0xffffffff}]
+         :outputs [{:value 900 :script-pubkey [0x51]}]
+         :witnesses [[tapscript control]]
+         :prevout-coins [coin] :locktime 0}]
+    (is (script/verify-input
+         transaction 0 coin #{:p2sh :witness :taproot}))
+    (is (= :bitcoin.consensus/discouraged-taproot-version
+           (error-type
+            #(script/verify-input
+              transaction 0 coin
+              #{:p2sh :witness :taproot
+                :discourage-upgradable-taproot-version}))))))
 
 (deftest script-stack-numeric-conditional-and-hash-opcode-conformance
   (let [context

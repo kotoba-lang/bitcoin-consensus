@@ -67,11 +67,14 @@
    "DISCOURAGE_UPGRADABLE_NOPS" :discourage-upgradable-nops
    "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"
    :discourage-upgradable-witness-program
+   "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"
+   :discourage-upgradable-taproot-version
+   "DISCOURAGE_OP_SUCCESS" :discourage-op-success
+   "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"
+   :discourage-upgradable-pubkeytype
    "TAPROOT" :taproot})
 
-(def unsupported-flags
-  #{"DISCOURAGE_UPGRADABLE_TAPROOT_VERSION" "DISCOURAGE_OP_SUCCESS"
-    "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"})
+(def unsupported-flags #{})
 
 (defn- hex-bytes [value]
   (if (empty? value)

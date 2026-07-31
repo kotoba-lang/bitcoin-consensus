@@ -77,7 +77,9 @@ to `:validated` additionally requires a full background chainstate match.
 
 This is still not a drop-in Bitcoin Core replacement. All 1,222 upstream
 Script, all 214 transaction, and all 500 legacy sighash vectors run in CI with
-exact parity, including Core-generated Taproot fixtures and policy flags. The
+exact parity, including Core-generated Taproot fixtures and policy flags for
+unknown leaf versions, `OP_SUCCESS`, and upgradable tapscript public-key types.
+These policy flags remain opt-in and do not narrow block-consensus acceptance. The
 mainnet-sized disk UTXO/undo backend is integrated by `bitcoin-node` with atomic
 fork-choice metadata and snapshot-start support. Completing a full
 genesis-to-tip mainnet historical differential run remains required.
