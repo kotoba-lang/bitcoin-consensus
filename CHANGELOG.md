@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.36.0 — 2026-07-31
+
+- Classify pruned/missing undo, missing staged bodies, SQLite ancestry and
+  integrity failures, pending-body limits, closed views, and chainstate
+  corruption as local host failures rather than definitive block invalidity.
+- Keep local/history/storage failures unannotated by a candidate block hash so
+  neither durable branch quarantine nor provider punishment can result.
+- Cover a real higher-work reorganization whose active undo was pruned,
+  proving the candidate remains viable for authenticated reindex recovery.
+
 ## 0.35.1 — 2026-07-31
 
 - Match Core's `BLOCK_MUTATED` result for mismatched and ambiguous transaction

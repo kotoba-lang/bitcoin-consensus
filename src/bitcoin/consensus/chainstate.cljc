@@ -7,6 +7,7 @@
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.consensus.versionbits :as versionbits]
+            [clojure.string :as str]
             [kotobase.bitcoin.protocol :as header]))
 
 (defn- hex-bytes [value]
@@ -426,7 +427,41 @@
   ;; into a persistent consensus decision.
   #{:bitcoin.consensus/missing-script-verifier
     :bitcoin.consensus/missing-locktime-ancestor
-    :bitcoin.consensus/unknown-bip30-block})
+    :bitcoin.consensus/unknown-bip30-block
+    :bitcoin.consensus/missing-prevout-data
+    :bitcoin.consensus/missing-block-data
+    :bitcoin.consensus/missing-undo
+    :bitcoin.consensus/closed-utxo-view
+    :bitcoin.consensus/uncommitted-utxo-enumeration
+    :bitcoin.consensus/invalid-outpoint
+    :bitcoin.consensus/invalid-active-chain
+    :bitcoin.consensus/no-viable-header
+    :bitcoin.consensus/unknown-invalid-block
+    :bitcoin.consensus/validated-block-invalidation
+    :bitcoin.consensus/header-block-mismatch
+    :bitcoin.consensus/wrong-genesis
+    :bitcoin.consensus/unknown-parent
+    :bitcoin.consensus/duplicate-header-batch
+    :bitcoin.consensus/known-header-batch
+    :bitcoin.consensus/known-invalid-block
+    :bitcoin.consensus/fault-injector
+    :bitcoin.consensus/sync-resource-limit
+    :bitcoin.consensus/unknown-peer
+    :bitcoin.consensus/chainstate-checksum-mismatch
+    :bitcoin.consensus/chainstate-network-mismatch
+    :bitcoin.consensus/chainstate-not-found
+    :bitcoin.consensus/corrupt-chainstate
+    :bitcoin.consensus/unsupported-chainstate-format})
+
+(def ^:private local-validation-error-prefixes
+  ["sqlite-" "pending-block" "undo-"])
+
+(defn- local-validation-error-type? [type]
+  (or (contains? local-validation-error-types type)
+      (and (keyword? type)
+           (= "bitcoin.consensus" (namespace type))
+           (some #(str/starts-with? (name type) %)
+                 local-validation-error-prefixes))))
 
 (defn block-validation-result
   "Classify an ExceptionInfo at the block-index failure boundary.
@@ -438,7 +473,7 @@
   (let [type (:type (ex-data error))]
     (cond
       (contains? mutated-block-error-types type) :mutated
-      (contains? local-validation-error-types type) :local
+      (local-validation-error-type? type) :local
       (= "bitcoin.consensus" (namespace type)) :invalid
       :else :unknown)))
 

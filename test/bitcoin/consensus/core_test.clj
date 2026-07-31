@@ -547,10 +547,40 @@
   (doseq [type
           [:bitcoin.consensus/missing-script-verifier
            :bitcoin.consensus/missing-locktime-ancestor
-           :bitcoin.consensus/unknown-bip30-block]]
-    (let [error (ex-info "local validation dependency" {:type type})]
+           :bitcoin.consensus/unknown-bip30-block
+           :bitcoin.consensus/missing-prevout-data
+           :bitcoin.consensus/missing-block-data
+           :bitcoin.consensus/missing-undo
+           :bitcoin.consensus/closed-utxo-view
+           :bitcoin.consensus/uncommitted-utxo-enumeration
+           :bitcoin.consensus/invalid-outpoint
+           :bitcoin.consensus/invalid-active-chain
+           :bitcoin.consensus/no-viable-header
+           :bitcoin.consensus/unknown-invalid-block
+           :bitcoin.consensus/validated-block-invalidation
+           :bitcoin.consensus/header-block-mismatch
+           :bitcoin.consensus/wrong-genesis
+           :bitcoin.consensus/unknown-parent
+           :bitcoin.consensus/duplicate-header-batch
+           :bitcoin.consensus/known-header-batch
+           :bitcoin.consensus/known-invalid-block
+           :bitcoin.consensus/fault-injector
+           :bitcoin.consensus/sync-resource-limit
+           :bitcoin.consensus/unknown-peer
+           :bitcoin.consensus/chainstate-checksum-mismatch
+           :bitcoin.consensus/chainstate-network-mismatch
+           :bitcoin.consensus/chainstate-not-found
+           :bitcoin.consensus/corrupt-chainstate
+           :bitcoin.consensus/unsupported-chainstate-format
+           :bitcoin.consensus/sqlite-header-ancestry
+           :bitcoin.consensus/pending-block-limit
+           :bitcoin.consensus/undo-pruned]]
+    (let [error (ex-info "local validation dependency" {:type type})
+          annotated
+          (chainstate/annotate-block-validation-error "candidate" error)]
       (is (= :local (chainstate/block-validation-result error)))
       (is (chainstate/local-validation-error? error))
+      (is (identical? error annotated))
       (is (false? (chainstate/invalid-block-error? error)))))
   (is (= :unknown
          (chainstate/block-validation-result
@@ -1726,6 +1756,41 @@
                         [:nodes (get-in a2 [:header :hash-hex]) :active?])))
     (is (true? (get-in reorganized
                        [:nodes (get-in b2 [:header :hash-hex]) :active?])))))
+
+(deftest pruned-reorg-history-is-local-not-a-candidate-consensus-failure
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        a1 (mine-regtest-block genesis 1 31)
+        a2 (mine-regtest-block a1 2 31)
+        b1 (mine-regtest-block genesis 1 32)
+        b2 (mine-regtest-block b1 2 32)
+        b3 (mine-regtest-block b2 3 32)
+        state
+        (-> (chainstate/initialize :regtest genesis (constantly true))
+            (chainstate/accept-block a1 2000000000 (constantly true))
+            (chainstate/accept-block a2 2000000000 (constantly true))
+            (chainstate/accept-block b1 2000000000 (constantly true))
+            (chainstate/accept-block b2 2000000000 (constantly true)))
+        pruned
+        (-> state
+            (update-in [:nodes (get-in a1 [:header :hash-hex])] dissoc :undo)
+            (update-in [:nodes (get-in a2 [:header :hash-hex])] dissoc :undo))
+        error
+        (try
+          (chainstate/accept-block
+           pruned b3 2000000000 (constantly true)
+           {:undo-fn
+            (fn [hash]
+              (throw
+               (ex-info "undo intentionally pruned"
+                        {:type :bitcoin.consensus/undo-pruned
+                         :hash hash})))})
+          (catch clojure.lang.ExceptionInfo value value))]
+    (is (= :bitcoin.consensus/undo-pruned (:type (ex-data error))))
+    (is (chainstate/local-validation-error? error))
+    (is (false? (chainstate/invalid-block-error? error)))
+    (is (nil? (:invalid-block-hash (ex-data error))))
+    (is (= (:active-tip pruned) (:active-tip state)))
+    (is (= (:best-header pruned) (:best-header state)))))
 
 (deftest invalid-high-work-branch-is-persisted-and-fork-choice-recovers
   (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
