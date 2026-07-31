@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.26.0 — 2026-07-31
+
+- Match Bitcoin Core's retroactive P2SH, WITNESS, and TAPROOT block Script
+  flags across historical validation instead of gating them at activation.
+- Apply historical Script flag exceptions before adding active
+  DERSIG/CLTV/CSV/NULLDUMMY flags, so the Taproot exception removes Taproot
+  alone without disabling unrelated active consensus rules.
+
 ## 0.25.0 — 2026-07-31
 
 - Apply Bitcoin Core `CheckBlock`'s context-free legacy sigop bound before a

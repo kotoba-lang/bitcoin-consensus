@@ -1126,21 +1126,36 @@
             (assoc base :inputs [{:sequence 0x80000001}])
             [100] (constantly 0))))))
 
-(deftest block-script-flags-follow-buried-activation-boundaries
+(deftest block-script-flags-match-core-retroactive-and-exception-order
   (let [mainnet (:mainnet chainstate/consensus-parameters)
         before (chainstate/script-flags mainnet 363724 "ordinary")
         dersig (chainstate/script-flags mainnet 363725 "ordinary")
-        segwit (chainstate/script-flags mainnet 481824 "ordinary")]
-    (is (= #{:p2sh} before))
+        segwit (chainstate/script-flags mainnet 481824 "ordinary")
+        witness-shaped-coin
+        {:value 1000
+         :script-pubkey (vec (concat [0 20] (repeat 20 7)))}
+        legacy-shaped-spend (spending-transaction [] nil)
+        taproot-exception
+        (chainstate/script-flags
+         mainnet 692261
+         "0000000000000000000f14c35b2d841e986ab5441de8c585d5ffe55ea1e395ad")]
+    (is (= #{:p2sh :witness :taproot} before))
     (is (contains? dersig :dersig))
     (is (not (contains? dersig :cltv)))
-    (is (not (contains? dersig :witness)))
+    (is (contains? dersig :witness))
+    (is (contains? dersig :taproot))
     (is (contains? segwit :null-dummy))
     (is (contains? segwit :witness))
-    (is (not (contains? segwit :taproot)))
-    (is (contains?
-         (chainstate/script-flags mainnet 709632 "ordinary")
-         :taproot))
+    (is (contains? segwit :taproot))
+    (is (true?
+         (script/verify-input
+          legacy-shaped-spend 0 witness-shaped-coin #{})))
+    (is (= :bitcoin.consensus/witness-program-mismatch
+           (error-type
+            #(script/verify-input
+              legacy-shaped-spend 0 witness-shaped-coin before))))
+    (is (= #{:p2sh :witness :dersig :cltv :csv :null-dummy}
+           taproot-exception))
     (is (= #{}
            (chainstate/script-flags
             mainnet 170060

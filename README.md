@@ -22,7 +22,8 @@ This repository is separate from the permanently read-only
   consensus parameters and genesis trust anchors
 - legacy, P2SH, SegWit v0, and Taproot key/script-path Script verification
 - legacy, BIP143, and BIP341/342 sighash plus ECDSA/BIP340 Schnorr verification
-- historical lax-DER/BIP66, CLTV, CSV/BIP68, BIP147, and BIP30 exceptions
+- Core-retroactive P2SH/WITNESS/TAPROOT flags plus historical
+  lax-DER/BIP66, CLTV, CSV/BIP68, BIP147, Taproot, and BIP30 exceptions
 - BIP9 versionbits state transitions and network-specific buried deployments
 - early `CheckBlock`-equivalent legacy sigop rejection plus full
   legacy/P2SH/witness accounting with the 80,000 block-cost limit

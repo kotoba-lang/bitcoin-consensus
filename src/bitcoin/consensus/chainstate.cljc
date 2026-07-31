@@ -109,24 +109,22 @@
     "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721"})
 
 (defn script-flags
-  "Bitcoin Core block-consensus Script flags for a known deployment state."
+  "Bitcoin Core block-consensus Script flags for a known block.
+
+  Core retroactively keeps P2SH, WITNESS, and TAPROOT enabled across history
+  and removes only the flags named by its two historical exception blocks.
+  Buried-deployment flags are added after applying that exception."
   ([parameters height block-hash]
-   (let [{:keys [taproot-height taproot-deployment]} parameters]
-     (script-flags
-      parameters height block-hash
-      (or (true? (:always-active? taproot-deployment))
-          (and (integer? taproot-height)
-               (>= height taproot-height))))))
+   (script-flags parameters height block-hash nil))
   ([{:keys [bip65-height bip66-height csv-height segwit-height
             script-flag-exceptions]}
-    height block-hash taproot-active?]
-   (or (get script-flag-exceptions block-hash)
-       (cond-> #{:p2sh}
-         (>= height bip66-height) (conj :dersig)
-         (>= height bip65-height) (conj :cltv)
-         (>= height csv-height) (conj :csv)
-         (>= height segwit-height) (conj :witness :null-dummy)
-         (and (>= height segwit-height) taproot-active?) (conj :taproot)))))
+    height block-hash _taproot-active?]
+   (cond-> (get script-flag-exceptions block-hash
+                #{:p2sh :witness :taproot})
+     (>= height bip66-height) (conj :dersig)
+     (>= height bip65-height) (conj :cltv)
+     (>= height csv-height) (conj :csv)
+     (>= height segwit-height) (conj :null-dummy))))
 
 #?(:clj
    (defn- verifier-for
