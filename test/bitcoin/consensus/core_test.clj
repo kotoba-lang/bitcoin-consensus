@@ -1001,6 +1001,26 @@
            (chainstate/script-flags
             (:testnet4 chainstate/consensus-parameters) 1 "ordinary")))))
 
+(deftest compact-target-overflow-boundaries-match-core-setcompact
+  (let [zero-hash (vec (repeat 32 0))
+        candidate
+        (fn [bits]
+          {:hash zero-hash :hash-hex (apply str (repeat 64 "0"))
+           :prev-block zero-hash :timestamp 1 :bits bits})]
+    (is (= (header/bits->target-bytes 0x1f7f0000)
+           (header/bits->target-bytes 0x2100007f)))
+    (is (= (header/bits->target-bytes 0x207f0000)
+           (header/bits->target-bytes 0x2200007f)))
+    (is (:valid?
+         (header/validate-header-consensus
+          [(candidate 0x2200007f)]
+          {:network :regtest :start-height 0 :validate-from-index 0})))
+    (is (= :invalid-target
+           (-> (header/validate-header-consensus
+                [(candidate 0x23000001)]
+                {:network :regtest :start-height 0 :validate-from-index 0})
+               :errors first :type)))))
+
 (deftest testnet4-bip94-timewarp-boundary-matches-core
   (let [parameters (:testnet4 chainstate/consensus-parameters)
         parent-natural (vec (repeat 32 1))

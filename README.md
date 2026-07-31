@@ -17,7 +17,7 @@ This repository is separate from the permanently read-only
 - block coinbase, duplicate transaction, and 4,000,000 weight checks
 - contextual header difficulty, PoW, linkage, MTP, future-time, testnet4
   BIP94 adjustment-boundary timewarp protection, buried BIP34/BIP66/BIP65
-  version floors, and chainwork
+  version floors, Core-exact compact-target overflow boundaries, and chainwork
 - mainnet, testnet3, testnet4/BIP94, default signet/BIP325, and regtest
   consensus parameters and genesis trust anchors
 - legacy, P2SH, SegWit v0, and Taproot key/script-path Script verification
