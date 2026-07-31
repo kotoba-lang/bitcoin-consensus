@@ -14,8 +14,9 @@ This repository is separate from the permanently read-only
 - transaction Merkle trees with CVE-2012-2459-style mutation detection
 - BIP141 witness commitment validation
 - block coinbase, duplicate transaction, and 4,000,000 weight checks
-- contextual header difficulty, PoW, linkage, MTP, future-time, buried
-  BIP34/BIP66/BIP65 version floors, and chainwork
+- contextual header difficulty, PoW, linkage, MTP, future-time, testnet4
+  BIP94 adjustment-boundary timewarp protection, buried BIP34/BIP66/BIP65
+  version floors, and chainwork
 - mainnet, testnet3, testnet4/BIP94, default signet/BIP325, and regtest
   consensus parameters and genesis trust anchors
 - legacy, P2SH, SegWit v0, and Taproot key/script-path Script verification
@@ -24,7 +25,8 @@ This repository is separate from the permanently read-only
 - BIP9 versionbits state transitions and network-specific buried deployments
 - legacy/P2SH/witness sigop accounting with the 80,000 block-cost limit
 - transaction finality plus BIP34/BIP113 and relative lock-time validation
-- atomic UTXO application, coinbase maturity, per-network subsidy, fees, and undo
+- atomic UTXO application, input/accumulated-fee MoneyRange, coinbase
+  maturity, per-network subsidy, fees, and undo
 - network-bound SQLite UTXO storage with WAL/FULL durability, ordered outpoints,
   atomic block delta + undo commits, stale-tip rejection, restart-safe
   disconnect, multi-block reorganization + host-state commits, integrity

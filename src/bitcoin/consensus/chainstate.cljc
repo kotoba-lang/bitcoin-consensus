@@ -63,6 +63,9 @@
               :csv-height 1
               :bip113-height 1
               :segwit-height 1
+              :enforce-bip94? true
+              :difficulty-adjustment-interval 2016
+              :max-timewarp 600
               :taproot-height 1
               :taproot-deployment {:always-active? true}
               :halving-interval 210000
@@ -229,6 +232,28 @@
                     :deployment deployment
                     :activation-height activation-height}))))
 
+(defn validate-bip94-timewarp!
+  "Enforce Core's BIP94 adjustment-boundary timestamp floor.
+
+  On testnet4, the first block of each 2,016-block difficulty period may not
+  predate its parent by more than 600 seconds. The equality boundary is valid,
+  matching `ContextualCheckBlockHeader` in Bitcoin Core."
+  [{:keys [enforce-bip94? difficulty-adjustment-interval max-timewarp]}
+   height parent-header candidate-header]
+  (when (and enforce-bip94?
+             (pos? height)
+             (zero? (mod height difficulty-adjustment-interval))
+             (< (:timestamp candidate-header)
+                (- (:timestamp parent-header) max-timewarp)))
+    (codec/fail! :bitcoin.consensus/timewarp-attack
+                 "Block timestamp is too early at a BIP94 adjustment boundary."
+                 {:height height
+                  :timestamp (:timestamp candidate-header)
+                  :parent-timestamp (:timestamp parent-header)
+                  :minimum-timestamp
+                  (- (:timestamp parent-header) max-timewarp)}))
+  candidate-header)
+
 (defn- validate-header! [state parsed-block now]
   (let [parent (parent-hash parsed-block)
         parent-node (get-in state [:nodes parent])]
@@ -249,6 +274,9 @@
         (codec/fail! :bitcoin.consensus/invalid-header
                      "Block header failed contextual consensus."
                      {:errors (:errors result)}))
+      (validate-bip94-timewarp!
+       (:consensus state) (inc (:height parent-node))
+       (:header parent-node) (:header parsed-block))
       (validate-buried-header-version!
        (:consensus state) (inc (:height parent-node))
        (:header parsed-block))
@@ -585,6 +613,13 @@
                            "Header batch failed contextual consensus."
                            {:errors (:errors result)}))
             (doseq [[index parsed-header] (map-indexed vector parsed-headers)]
+              (validate-bip94-timewarp!
+               (:consensus state)
+               (+ (:height parent-node) index 1)
+               (if (zero? index)
+                 (:header parent-node)
+                 (nth parsed-headers (dec index)))
+               parsed-header)
               (validate-buried-header-version!
                (:consensus state)
                (+ (:height parent-node) index 1)

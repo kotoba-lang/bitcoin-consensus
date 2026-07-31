@@ -10,6 +10,12 @@
 (def max-block-sigop-cost 80000)
 (def max-script-size 10000)
 
+(defn money-range?
+  "Bitcoin Core's consensus MoneyRange predicate."
+  [value]
+  (and (integer? value)
+       (<= 0 value transaction/max-money)))
+
 (defprotocol CoinStore
   "Persistent-map semantics required by consensus. Implementations may return
   immutable overlays backed by an on-disk ordered store."
@@ -75,6 +81,10 @@
                    "Transaction spends an immature coinbase output."
                    {:input-index input-index :coin-height (:height coin)
                     :height height}))
+    (when-not (money-range? (:value coin))
+      (codec/fail! :bitcoin.consensus/input-value-out-of-range
+                   "Spent output value is outside MoneyRange."
+                   {:input-index input-index :value (:value coin)}))
     (when-not (true? (verify-script transaction input-index coin))
       (codec/fail! :bitcoin.consensus/script-failed
                    "Input script verification failed."
@@ -174,18 +184,30 @@
                   (fn [[current total] index input]
                     (let [[next-state value]
                           (spend-input current transaction index input
-                                       height verify-script)]
-                      [next-state (+ total value)]))
+                                       height verify-script)
+                          next-total (+ total value)]
+                      (when-not (money-range? next-total)
+                        (codec/fail!
+                         :bitcoin.consensus/input-value-out-of-range
+                         "Transaction input total exceeds MAX_MONEY."
+                         {:input-index index :value next-total}))
+                      [next-state next-total]))
                   [working 0] (vec (:inputs transaction)))
                  output-value (transaction/output-value transaction)]
              (when (> output-value input-value)
                (codec/fail! :bitcoin.consensus/inputs-below-outputs
                             "Transaction creates value."
                             {:inputs input-value :outputs output-value}))
-             [(add-outputs spent transaction height false
-                           (:allow-bip30-overwrite? options))
-              (+ total-fees (- input-value output-value))
-              sigops]))
+             (let [next-fees (+ total-fees (- input-value output-value))]
+               (when-not (money-range? next-fees)
+                 (codec/fail!
+                  :bitcoin.consensus/accumulated-fee-out-of-range
+                  "Accumulated block fees exceed MAX_MONEY."
+                  {:fees next-fees}))
+               [(add-outputs spent transaction height false
+                             (:allow-bip30-overwrite? options))
+                next-fees
+                sigops])))
          [state 0 initial-sigops] (rest transactions))
         coinbase-value (transaction/output-value coinbase)
         allowed (+ (block-subsidy

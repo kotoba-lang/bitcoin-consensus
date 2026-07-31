@@ -714,6 +714,56 @@
     (is (= 2500000000 (utxo/block-subsidy 150 150)))
     (is (zero? (utxo/block-subsidy (* 64 210000))))))
 
+(deftest utxo-input-and-accumulated-fees-enforce-core-money-range
+  (let [id-a (vec (repeat 32 31))
+        id-b (vec (repeat 32 32))
+        spend-id (vec (repeat 32 33))
+        coinbase
+        {:txid-natural (vec (repeat 32 34))
+         :inputs [{:txid-natural (vec (repeat 32 0))
+                   :vout 0xffffffff}]
+         :outputs [{:value (utxo/block-subsidy 1)
+                    :script-pubkey [81]}]}
+        spend
+        {:txid-natural spend-id
+         :inputs [{:txid-natural id-a :vout 0}
+                  {:txid-natural id-b :vout 0}]
+         :outputs [{:value 0 :script-pubkey [81]}]}
+        coin (fn [value]
+               {:value value :script-pubkey [81]
+                :height 0 :coinbase? false})]
+    (is (utxo/money-range? transaction/max-money))
+    (is (not (utxo/money-range? (inc transaction/max-money))))
+    (is (= :bitcoin.consensus/input-value-out-of-range
+           (error-type
+            #(utxo/apply-block
+              {:height 0
+               :coins {[id-a 0] (coin (inc transaction/max-money))
+                       [id-b 0] (coin 0)}}
+              {:transactions [coinbase spend]} 1 (constantly true)))))
+    (is (= :bitcoin.consensus/input-value-out-of-range
+           (error-type
+            #(utxo/apply-block
+              {:height 0
+               :coins {[id-a 0] (coin transaction/max-money)
+                       [id-b 0] (coin 1)}}
+              {:transactions [coinbase spend]} 1 (constantly true)))))
+    (let [fee (inc (quot transaction/max-money 2))
+          spend-a (assoc spend
+                         :txid-natural (vec (repeat 32 35))
+                         :inputs [{:txid-natural id-a :vout 0}])
+          spend-b (assoc spend
+                         :txid-natural (vec (repeat 32 36))
+                         :inputs [{:txid-natural id-b :vout 0}])]
+      (is (= :bitcoin.consensus/accumulated-fee-out-of-range
+             (error-type
+              #(utxo/apply-block
+                {:height 0
+                 :coins {[id-a 0] (coin fee)
+                         [id-b 0] (coin fee)}}
+                {:transactions [coinbase spend-a spend-b]}
+                1 (constantly true))))))))
+
 (deftest undo-restores-the-exact-previous-utxo-state
   (let [genesis (block/parse (hex->bytes genesis-block-hex))
         transition
@@ -794,6 +844,64 @@
     (is (= #{:p2sh :witness :taproot :dersig :cltv :csv :null-dummy}
            (chainstate/script-flags
             (:testnet4 chainstate/consensus-parameters) 1 "ordinary")))))
+
+(deftest testnet4-bip94-timewarp-boundary-matches-core
+  (let [parameters (:testnet4 chainstate/consensus-parameters)
+        parent-natural (vec (repeat 32 1))
+        parent-hash (header/natural-hash->hex parent-natural)
+        parent-header {:timestamp 1000000 :bits 0x1d00ffff}
+        candidate
+        (fn [timestamp]
+          (header/decode-block-header
+           (header/encode-block-header
+            {:version 4
+             :prev-block parent-natural
+             :merkle-root (vec (repeat 32 2))
+             :timestamp timestamp
+             :bits 0x1d00ffff
+             :nonce 0})))
+        state
+        {:network :testnet4
+         :consensus parameters
+         :best-header parent-hash
+         :nodes
+         {parent-hash
+          {:hash parent-hash :parent nil :height 2015
+           :header parent-header :chainwork header/zero-chainwork
+           :deployments {:taproot :active}}}}]
+    (is (= 600 (:max-timewarp parameters)))
+    (is (= :bitcoin.consensus/timewarp-attack
+           (error-type
+            #(chainstate/validate-bip94-timewarp!
+              parameters 2016 parent-header (candidate 999399)))))
+    (is (= 999400
+           (:timestamp
+            (chainstate/validate-bip94-timewarp!
+             parameters 2016 parent-header (candidate 999400)))))
+    (is (= 999399
+           (:timestamp
+            (chainstate/validate-bip94-timewarp!
+             parameters 2015 parent-header (candidate 999399)))))
+    (with-redefs [header/validate-header-consensus
+                  (fn [& _] {:valid? true :errors []})]
+      (is (= :bitcoin.consensus/timewarp-attack
+             (error-type
+              #(chainstate/accept-header
+                state (candidate 999399) 2000000000))))
+      (is (= :bitcoin.consensus/timewarp-attack
+             (error-type
+              #(chainstate/accept-headers
+                state [(candidate 999399)] 2000000000))))
+      (is (= 2016
+             (get-in
+              (chainstate/accept-header
+               state (candidate 999400) 2000000000)
+              [:nodes (get-in (candidate 999400) [:hash-hex]) :height])))
+      (is (= 2016
+             (get-in
+              (chainstate/accept-headers
+               state [(candidate 999400)] 2000000000)
+              [:nodes (get-in (candidate 999400) [:hash-hex]) :height]))))))
 
 (deftest signet-genesis-and-bip325-challenge-are-validated
   (let [state (chainstate/initialize :signet signet-genesis-block)
