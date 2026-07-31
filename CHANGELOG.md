@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.31.0 — 2026-07-31
+
+- Match Bitcoin Core's 256-bit `GetBlockProofEquivalentTime` rounding at the
+  strict two-week `assumevalid` burial boundary.
+- Keep Script verification enabled for the narrow work interval that the
+  previous `tipWork * 2016` approximation classified as sufficiently buried.
+
 ## 0.27.0 — 2026-07-31
 
 - Restrict historical BIP30 overwrite permission to coinbase outputs, matching

@@ -396,17 +396,50 @@
                       (if borrowed? (+ difference 256) difference))
                (if borrowed? 1 0))))))
 
-(defn- multiply-chainwork [value multiplier]
+(defn- multiply-chainwork-with-overflow
+  "Multiply an unsigned 256-bit value by a small integer.
+
+  The returned value wraps at 256 bits like Core's `arith_uint256`; the
+  overflow flag records whether any high bits were discarded."
+  [value multiplier]
   (loop [index 31 result (vec (repeat 32 0)) carry 0]
     (if (neg? index)
-      result
+      [result (pos? carry)]
       (let [product (+ (* (nth value index) multiplier) carry)]
         (recur (dec index)
                (assoc result index (mod product 256))
                (quot product 256))))))
 
+(defn- multiply-chainwork [value multiplier]
+  (first (multiply-chainwork-with-overflow value multiplier)))
+
 (defn- chainwork-at-least? [actual minimum]
   (not (header/better-chain? minimum actual)))
+
+(def ^:private target-spacing-seconds 600)
+(def ^:private assumevalid-burial-seconds (* 14 24 60 60))
+
+(defn- sufficiently-buried-for-assumevalid?
+  "Core-exact `GetBlockProofEquivalentTime(...) > two weeks` predicate.
+
+  Core first wraps `work-distance * target-spacing` to 256 bits, divides by
+  tip work, then compares the quotient. For nonzero `tip-work`,
+
+      floor(numerator / tip-work) > seconds
+
+  is equivalent to `numerator >= tip-work * (seconds + 1)`. If the right-hand
+  product overflows 256 bits it is mathematically above every wrapped
+  numerator, so the predicate is false. This preserves Core's integer
+  rounding boundary without a costly 256-bit division for every IBD block."
+  [work-distance tip-work]
+  (when-not (every? zero? tip-work)
+    (let [numerator
+          (multiply-chainwork work-distance target-spacing-seconds)
+          [minimum overflow?]
+          (multiply-chainwork-with-overflow
+           tip-work (inc assumevalid-burial-seconds))]
+      (and (not overflow?)
+           (not (header/better-chain? minimum numerator))))))
 
 (defn assumevalid-script-check?
   "Return true when Script must be checked under Bitcoin Core's assumevalid
@@ -439,12 +472,11 @@
               (let [work-distance
                     (subtract-chainwork (:chainwork best-node)
                                         (:chainwork block-node))
-                    two-weeks-at-tip-work
-                    (multiply-chainwork
-                     (header/header-work (get-in best-node [:header :bits]))
-                     2016)]
-                (header/better-chain? work-distance
-                                      two-weeks-at-tip-work)))]
+                    tip-work
+                    (header/header-work
+                     (get-in best-node [:header :bits]))]
+                (sufficiently-buried-for-assumevalid?
+                 work-distance tip-work)))]
      (not (and assume-valid-hash
                in-assumed-chain?
                in-best-chain?

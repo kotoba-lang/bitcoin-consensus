@@ -49,8 +49,9 @@ This repository is separate from the permanently read-only
   transaction-version handling
 - most-cumulative-work fork choice and tested multi-block reorganization
 - headers-first synchronization that never activates missing block data
-- Bitcoin Core-compatible `assumevalid` gates: assumed/best chain ancestry,
-  minimum chainwork, and more than two weeks of proof-equivalent burial
+- Bitcoin Core-exact `assumevalid` gates: assumed/best chain ancestry,
+  minimum chainwork, and 256-bit `GetBlockProofEquivalentTime` rounding at
+  the strict two-week proof-equivalent burial boundary
 - authenticated Core v2 AssumeUTXO streaming decode for mainnet, testnet3,
   testnet4, and signet, including exact `hash_serialized_3` commitments and
   constant-memory authenticated import into SQLite

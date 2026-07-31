@@ -1243,6 +1243,40 @@
             {:ancestor-node-at-height-fn resolver})))
       (is (= [[assumed-hash 0] [best-hash 0]] @calls)))))
 
+(deftest assumevalid-burial-matches-core-equivalent-time-rounding
+  (let [tip-work (header/header-work 0x1e0377ae)
+        one (assoc header/zero-chainwork 31 1)
+        two-weeks-work
+        (reduce header/add-chainwork
+                header/zero-chainwork (repeat 2016 tip-work))
+        premature-distance (header/add-chainwork two-weeks-work one)
+        qualified-distance
+        (header/add-chainwork two-weeks-work tip-work)
+        assumed-hash "rounding-assumed"
+        best-hash "rounding-best"
+        state-for
+        (fn [distance]
+          {:best-header best-hash
+           :consensus
+           {:assume-valid-hash assumed-hash
+            :minimum-chainwork header/zero-chainwork}
+           :nodes
+           {assumed-hash
+            {:hash assumed-hash :parent nil :height 0
+             :chainwork tip-work :header {:bits 0x1e0377ae}}
+            best-hash
+            {:hash best-hash :parent assumed-hash :height 2017
+             :chainwork (header/add-chainwork tip-work distance)
+             :header {:bits 0x1e0377ae}}}})]
+    (is (true?
+         (chainstate/assumevalid-script-check?
+          (state-for premature-distance) assumed-hash))
+        "one work unit beyond tipWork*2016 still rounds to exactly two weeks")
+    (is (false?
+         (chainstate/assumevalid-script-check?
+          (state-for qualified-distance) assumed-hash))
+        "one complete extra tip-work unit is strictly older than two weeks")))
+
 (deftest bip68-relative-height-and-time-locks-match-last-invalid-semantics
   (let [base {:version 2
               :inputs [{:sequence 3} {:sequence 0x00400002}]}
