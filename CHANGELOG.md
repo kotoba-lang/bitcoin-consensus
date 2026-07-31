@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.27.0 — 2026-07-31
+
+- Restrict historical BIP30 overwrite permission to coinbase outputs, matching
+  Core's `AddCoins` semantics.
+- Continue rejecting every non-coinbase collision with an unspent outpoint,
+  including while either fixed BIP30 repeat block is connected.
+
 ## 0.26.0 — 2026-07-31
 
 - Match Bitcoin Core's retroactive P2SH, WITNESS, and TAPROOT block Script

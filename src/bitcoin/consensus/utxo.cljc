@@ -204,8 +204,10 @@
                   :bitcoin.consensus/accumulated-fee-out-of-range
                   "Accumulated block fees exceed MAX_MONEY."
                   {:fees next-fees}))
-               [(add-outputs spent transaction height false
-                             (:allow-bip30-overwrite? options))
+               ;; Core's AddCoins permits BIP30 replacement only for a
+               ;; coinbase. A non-coinbase output may never overwrite an
+               ;; unspent outpoint, including inside either repeat block.
+               [(add-outputs spent transaction height false false)
                 next-fees
                 sigops])))
          [state 0 initial-sigops] (rest transactions))

@@ -835,6 +835,28 @@
              existing block 1 (constantly true)
              {:allow-bip30-overwrite? true})
             [:coins [txid 0] :value])))
+    (let [source-id (vec (repeat 32 22))
+          repeated-id (vec (repeat 32 23))
+          spend
+          {:txid-natural repeated-id
+           :inputs [{:txid-natural source-id :vout 0
+                     :script-sig [] :sequence 0xffffffff}]
+           :outputs [{:value 1 :script-pubkey [81]}]}
+          collision-state
+          {:height 0
+           :coins {[source-id 0]
+                   {:value 1 :script-pubkey [81]
+                    :height 0 :coinbase? false}
+                   [repeated-id 0]
+                   {:value 2 :script-pubkey [81]
+                    :height 0 :coinbase? false}}}]
+      (is (= :bitcoin.consensus/overwrite-unspent
+             (error-type
+              #(utxo/apply-block
+                collision-state
+                {:transactions [coinbase spend]}
+                1 (constantly true)
+                {:allow-bip30-overwrite? true})))))
     (is (empty?
          (:coins
           (utxo/apply-block
