@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.34.3 — 2026-07-31
+
+- Add disabled-by-default hard-crash boundaries around compact host metadata
+  and pending-block updates, proving invalid-branch cleanup is all-old or
+  all-new across process termination.
+
 ## 0.34.2 — 2026-07-31
 
 - Keep the normal no-failure header-acceptance path O(1) by avoiding needless

@@ -44,4 +44,9 @@
           :host-state-bytes (.getBytes "new-host")
           :pending-delete [pending-hash]})
 
+       "host-update"
+       #(sqlite/save-host-headers-and-pending!
+         backend "old" 0 (.getBytes "new-host") []
+         {:delete [pending-hash]})
+
        (throw (ex-info "Unknown crash operation." {:fault fault}))))))

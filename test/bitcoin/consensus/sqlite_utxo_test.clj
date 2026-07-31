@@ -617,6 +617,33 @@
                    (seq (sqlite/host-state backend))))
             (is (= :ok (:integrity (sqlite/integrity-check! backend))))))))))
 
+(deftest hard-process-crashes-never-split-host-and-pending-updates
+  (doseq [fault
+          [:host-update/after-headers
+           :host-update/after-pending
+           :host-update/after-host
+           :host-update/before-commit
+           :host-update/after-commit]]
+    (testing (str fault)
+      (with-database
+        (fn [path]
+          (let [pending-hash (initialize-crash-database! path)
+                process (crash-process! path fault pending-hash)
+                backend (sqlite/open {:path path :network :regtest})
+                committed? (= fault :host-update/after-commit)]
+            (is (:finished? process) (:output process))
+            (is (= 91 (:exit process)) (:output process))
+            (is (= {:height 0 :tip "old" :coin-count 1}
+                   (select-keys
+                    (sqlite/status backend) [:height :tip :coin-count])))
+            (is (= (if committed?
+                     {:pending-blocks 0 :pending-bytes 0}
+                     {:pending-blocks 1 :pending-bytes 81})
+                   (sqlite/pending-status backend)))
+            (is (= (seq (.getBytes (if committed? "new-host" "old-host")))
+                   (seq (sqlite/host-state backend))))
+            (is (= :ok (:integrity (sqlite/integrity-check! backend))))))))))
+
 (deftest hard-process-crashes-never-publish-partial-linear-blocks
   (doseq [fault
           [:commit-block/after-undo

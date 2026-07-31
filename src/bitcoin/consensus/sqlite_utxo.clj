@@ -1189,9 +1189,14 @@
                     :expected-height expected-height
                     :actual-height actual-height}))
           (write-header-nodes! connection nodes)
+          (fault-point! :host-update/after-headers)
           (apply-pending-blocks! connection pending-options)
+          (fault-point! :host-update/after-pending)
           (write-host-state! connection bytes)
+          (fault-point! :host-update/after-host)
+          (fault-point! :host-update/before-commit)
           (.commit connection)
+          (fault-point! :host-update/after-commit)
           true)
         (catch Throwable error
           (.rollback connection)
