@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.34.2 — 2026-07-31
+
+- Keep the normal no-failure header-acceptance path O(1) by avoiding needless
+  ancestry traversal when the invalid-root set is empty.
+
 ## 0.34.1 — 2026-07-31
 
 - Add constant-JVM-memory normalized header-leaf discovery for one-time compact

@@ -62,11 +62,12 @@
     (into #{} (remove parents) (keys nodes))))
 
 (defn- invalid-ancestor [nodes invalid-blocks hash]
-  (loop [current hash]
-    (cond
-      (nil? current) nil
-      (contains? invalid-blocks current) current
-      :else (recur (get-in nodes [current :parent])))))
+  (when (seq invalid-blocks)
+    (loop [current hash]
+      (cond
+        (nil? current) nil
+        (contains? invalid-blocks current) current
+        :else (recur (get-in nodes [current :parent]))))))
 
 (defn validate!
   "Validate structural invariants that must survive a process restart."

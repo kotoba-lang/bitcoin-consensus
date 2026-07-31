@@ -313,11 +313,12 @@
   "Return the first directly invalid block on `hash` ancestry, if any."
   [state hash]
   (let [failed (invalid-blocks state)]
-    (loop [current hash]
-      (cond
-        (nil? current) nil
-        (contains? failed current) current
-        :else (recur (get-in state [:nodes current :parent]))))))
+    (when (seq failed)
+      (loop [current hash]
+        (cond
+          (nil? current) nil
+          (contains? failed current) current
+          :else (recur (get-in state [:nodes current :parent])))))))
 
 (defn block-invalid?
   "True when a block or one of its ancestors is permanently invalid."
