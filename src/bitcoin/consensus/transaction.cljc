@@ -13,7 +13,11 @@
 ;; These maxima are derived from Core's stripped transaction size rule.
 (def max-inputs 24389)
 (def max-outputs 111105)
-(def max-witness-items 100000)
+;; A SegWit block carrying an unknown-version spend also needs a minimal
+;; coinbase, reserved value, and witness commitment. Those plus the block and
+;; spending-transaction fields consume 1,007 weight units; every empty witness
+;; item costs one more. A round 100,000 cap was therefore not consensus-safe.
+(def max-witness-items 3998993)
 (def max-witness-item-bytes 4000000)
 (def locktime-threshold 500000000)
 (def final-sequence 0xffffffff)

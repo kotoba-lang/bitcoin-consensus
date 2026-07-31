@@ -8,7 +8,7 @@ This repository is separate from the permanently read-only
 ## Implemented
 
 - bounded, canonical CompactSize and raw legacy/SegWit transaction decoding,
-  including Core's stripped-size and size-derived item limits
+  including Core's stripped-size and weight-derived input/output/witness limits
 - unsigned 64-bit amount decoding without host integer overflow
 - txid/wtxid, exact transaction and block weight, money-range and prevout checks
 - transaction Merkle trees with CVE-2012-2459-style mutation detection

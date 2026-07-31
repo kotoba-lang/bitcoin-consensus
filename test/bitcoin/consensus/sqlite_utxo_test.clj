@@ -105,13 +105,24 @@
             (str path) (subs (str fault) 1) pending-hash]))
           (.redirectErrorStream true))
         process (.start builder)
-        finished? (.waitFor process 20 TimeUnit/SECONDS)]
+        ;; Drain while the child is alive. On newer JDKs the process reaper may
+        ;; close an unread pipe immediately after exit, making a later slurp
+        ;; race with stream closure and turning this crash-safety test flaky.
+        output-future
+        (future
+          (try
+            (slurp (.getInputStream process))
+            (catch java.io.IOException exception
+              (str "child output unavailable: " (.getMessage exception)))))
+        ;; Coverage runs start an instrumented child JVM and can legitimately
+        ;; need more than 20 seconds on a loaded verifier host.
+        finished? (.waitFor process 60 TimeUnit/SECONDS)]
     (when-not finished?
       (.destroyForcibly process)
       (.waitFor process 5 TimeUnit/SECONDS))
     {:finished? finished?
      :exit (when finished? (.exitValue process))
-     :output (slurp (.getInputStream process))}))
+     :output (deref output-future 10000 "child output drain timed out")}))
 
 (defn- initialize-crash-database! [path]
   (let [backend (sqlite/open {:path path :network :regtest})

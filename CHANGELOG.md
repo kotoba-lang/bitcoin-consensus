@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.0 — 2026-07-31
+
+- Replace the round 100,000 witness-item decoder cap with the exact
+  block-weight-derived maximum of 3,998,993 empty items.
+- Preserve consensus-valid large witness stacks for unknown witness versions,
+  retaining future soft-fork compatibility instead of enforcing policy during
+  decoding.
+
 ## 0.20.0 — 2026-07-31
 
 - Enforce Bitcoin Core's one-million-byte stripped transaction limit directly

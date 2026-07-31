@@ -334,7 +334,20 @@
                        :vout 0 :script-sig [] :sequence 0xffffffff}]
              :outputs [{:value 0 :script-pubkey large-script}]
              :locktime 0}))]
-      (is (= large-script (get-in parsed [:outputs 0 :script-pubkey]))))))
+      (is (= large-script (get-in parsed [:outputs 0 :script-pubkey]))))
+    (let [witness-items (vec (repeat 100001 []))
+          parsed
+          (transaction/parse
+           (transaction/serialize
+            {:version 2
+             :inputs [{:txid-natural (vec (repeat 32 1))
+                       :vout 0 :script-sig [] :sequence 0xffffffff}]
+             :outputs [{:value 0 :script-pubkey []}]
+             :witnesses [witness-items]
+             :segwit? true
+             :locktime 0}))]
+      (is (= 3998993 transaction/max-witness-items))
+      (is (= 100001 (count (get-in parsed [:witnesses 0])))))))
 
 (deftest context-free-transaction-and-finality-rules-fail-closed
   (let [input {:txid-natural (vec (repeat 32 3))
