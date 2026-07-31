@@ -24,7 +24,8 @@ This repository is separate from the permanently read-only
 - legacy, BIP143, and BIP341/342 sighash plus ECDSA/BIP340 Schnorr verification
 - historical lax-DER/BIP66, CLTV, CSV/BIP68, BIP147, and BIP30 exceptions
 - BIP9 versionbits state transitions and network-specific buried deployments
-- legacy/P2SH/witness sigop accounting with the 80,000 block-cost limit
+- early `CheckBlock`-equivalent legacy sigop rejection plus full
+  legacy/P2SH/witness accounting with the 80,000 block-cost limit
 - transaction finality plus BIP34/BIP113 and relative lock-time validation
 - atomic UTXO application, input/accumulated-fee MoneyRange, coinbase
   maturity, per-network subsidy, fees, and undo

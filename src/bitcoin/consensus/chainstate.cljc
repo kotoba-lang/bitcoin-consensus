@@ -464,6 +464,9 @@
     #?(:clj
        (when (get-in state [:consensus :signet?])
          (signet/validate! parsed-block)))
+    #?(:clj
+       (script/validate-block-legacy-sigops!
+        (:transactions parsed-block)))
     (when (>= height bip34-height)
       (validate-coinbase-height! parsed-block height))
     (doseq [value (:transactions parsed-block)]

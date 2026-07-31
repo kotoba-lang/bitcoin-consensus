@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.25.0 — 2026-07-31
+
+- Apply Bitcoin Core `CheckBlock`'s context-free legacy sigop bound before a
+  block body can enter either the active or side-chain block tree.
+- Preserve the exact 20,000-operation boundary while retaining full
+  P2SH/witness sigop-cost validation during UTXO connection.
+
 ## 0.22.0 — 2026-07-31
 
 - Match Bitcoin Core `CScript::IsUnspendable` by excluding output scripts above

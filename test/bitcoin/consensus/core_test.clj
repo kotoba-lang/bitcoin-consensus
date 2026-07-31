@@ -196,6 +196,21 @@
             (vec (concat header-bytes [1] (:raw coinbase))))
            (recur (inc nonce))))))))
 
+(defn mine-regtest-block-with-coinbase [parent coinbase]
+  (let [template {:version 4
+                  :prev-block (get-in parent [:header :hash])
+                  :merkle-root (:txid-natural coinbase)
+                  :timestamp (inc (get-in parent [:header :timestamp]))
+                  :bits 0x207fffff}]
+    (loop [nonce 0]
+      (let [header-bytes
+            (header/encode-block-header (assoc template :nonce nonce))
+            decoded (header/decode-block-header header-bytes)]
+        (if (header/hash-meets-target? (:hash decoded) (:bits decoded))
+          (block/parse
+           (vec (concat header-bytes [1] (:raw coinbase))))
+          (recur (inc nonce)))))))
+
 (deftest parses-and-validates-the-real-genesis-block
   (let [parsed (block/parse (hex->bytes genesis-block-hex))
         coinbase (first (:transactions parsed))]
@@ -1153,6 +1168,10 @@
 (deftest sigop-cost-counts-legacy-multisig-and-witness-units
   (is (= 3 (script/sigop-count [0x52 0xae 0xac] true)))
   (is (= 21 (script/sigop-count [0x52 0xae 0xac] false)))
+  (is (= 20000
+         (script/validate-block-legacy-sigops!
+          [{:inputs []
+            :outputs [{:script-pubkey (vec (repeat 1000 0xae))}]}])))
   (let [transaction
         {:inputs [{:script-sig []}]
          :outputs [{:script-pubkey [81]}]
@@ -1179,6 +1198,35 @@
             #(utxo/apply-block
               utxo/empty-state {:transactions [coinbase]} 1
               (constantly true) options))))))
+
+(deftest checkblock-legacy-sigop-limit-rejects-side-chain-body-early
+  (let [genesis (block/parse (hex->bytes regtest-genesis-block-hex))
+        active-one (mine-regtest-block genesis 1 70)
+        active-two (mine-regtest-block active-one 2 70)
+        base-coinbase (regtest-coinbase 1 71)
+        excessive-coinbase
+        (transaction/parse
+         (transaction/serialize
+          (-> base-coinbase
+              (assoc :segwit? false :witnesses nil)
+              (assoc-in [:outputs 0 :script-pubkey]
+                        (vec (repeat 1001 0xae))))))
+        invalid-side
+        (mine-regtest-block-with-coinbase genesis excessive-coinbase)
+        state
+        (-> (chainstate/initialize :regtest genesis (constantly true))
+            (chainstate/accept-block active-one 2000000000
+                                     (constantly true))
+            (chainstate/accept-block active-two 2000000000
+                                     (constantly true)))]
+    (is (= 20020
+           (script/transaction-legacy-sigop-count excessive-coinbase)))
+    (is (= :bitcoin.consensus/too-many-sigops
+           (error-type
+            #(chainstate/accept-block state invalid-side 2000000000
+                                      (constantly true)))))
+    (is (nil? (get-in state
+                      [:nodes (get-in invalid-side [:header :hash-hex])])))))
 
 (deftest official-bip341-keypath-sighash-and-signature-vector
   (let [raw

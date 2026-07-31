@@ -168,6 +168,31 @@
                 :else 0)))
           total)))))
 
+(defn transaction-legacy-sigop-count
+  "Return Core's context-free GetLegacySigOpCount for one transaction."
+  [transaction]
+  (+ (reduce + 0 (map #(sigop-count (:script-sig %) false)
+                      (:inputs transaction)))
+     (reduce + 0 (map #(sigop-count (:script-pubkey %) false)
+                      (:outputs transaction)))))
+
+(defn validate-block-legacy-sigops!
+  "Apply CheckBlock's early legacy sigop bound without requiring prevout data.
+
+  P2SH and witness sigops remain part of the full UTXO connection check."
+  [transactions]
+  (let [count-value
+        (reduce + 0 (map transaction-legacy-sigop-count transactions))
+        limit (quot max-block-sigop-cost witness-scale-factor)]
+    (when (> count-value limit)
+      (codec/fail! :bitcoin.consensus/too-many-sigops
+                   "Block exceeds the legacy signature-operation limit."
+                   {:legacy-count count-value
+                    :legacy-limit limit
+                    :cost (* witness-scale-factor count-value)
+                    :limit max-block-sigop-cost}))
+    count-value))
+
 (defn- false-value? [value]
   (or (empty? value)
       (every? zero? value)
