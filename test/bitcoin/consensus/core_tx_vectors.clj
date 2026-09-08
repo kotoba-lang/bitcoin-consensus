@@ -5,7 +5,7 @@
             [bitcoin.consensus.transaction :as transaction]
             [clojure.data.json :as json]
             [clojure.set :as set]
-            [clojure.string :as string])
+            [kotoba.lang.text :as string])
   (:gen-class))
 
 (defn- hex-bytes [value]
