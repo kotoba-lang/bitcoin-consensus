@@ -1,4 +1,9 @@
-{:paths ["src"]
+{:path
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       s ["src"]
  :deps
  {org.clojure/clojure {:mvn/version "1.12.5"}
   io.github.kotoba-lang/org-bitcoin-p2p

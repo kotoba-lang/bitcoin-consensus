@@ -9,7 +9,7 @@
             [bitcoin.consensus.transaction :as transaction]
             [btc-crypto.schnorr :as schnorr]
             [clojure.data.json :as json]
-            [clojure.string :as string]
+            [kotoba.lang.text :as string]
             [sha256d.core :as sha256d])
   (:gen-class))
 

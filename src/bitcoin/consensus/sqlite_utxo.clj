@@ -7,7 +7,7 @@
   (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.utxo :as utxo]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.bitcoin.protocol :as header])
   (:import [java.sql Connection PreparedStatement ResultSet]
            [javax.sql DataSource]

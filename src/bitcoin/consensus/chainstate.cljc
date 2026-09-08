@@ -7,7 +7,7 @@
             [bitcoin.consensus.transaction :as transaction]
             [bitcoin.consensus.utxo :as utxo]
             [bitcoin.consensus.versionbits :as versionbits]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotobase.bitcoin.protocol :as header]))
 
 (defn- hex-bytes [value]
