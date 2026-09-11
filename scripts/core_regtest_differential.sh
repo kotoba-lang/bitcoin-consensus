@@ -77,7 +77,7 @@ result="$(
     done
   } | CONSENSUS_CHAINSTATE_PATH="$chainstate_path" \
       CONSENSUS_RESTART_INTERVAL="$restart_interval" \
-      clojure -M -e '
+      kbb -M -e '
     (require (quote bitcoin.consensus.block)
              (quote bitcoin.consensus.chainstate)
              (quote bitcoin.consensus.storage)
@@ -147,7 +147,7 @@ snapshot_result="$(
   CONSENSUS_SNAPSHOT_CHAIN_TXS="$snapshot_chain_txs" \
   CONSENSUS_SNAPSHOT_COINS="$snapshot_coins" \
   CONSENSUS_CHAINSTATE_PATH="$chainstate_path" \
-  clojure -M -e '
+  kbb -M -e '
     (require (quote bitcoin.consensus.assumeutxo)
              (quote bitcoin.consensus.storage))
     (let [environment #(System/getenv %)
