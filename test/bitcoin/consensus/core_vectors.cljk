@@ -258,7 +258,7 @@
 
 (defn -main [& [path]]
   (when-not path
-    (throw (ex-info "Usage: clojure -M:core-vectors script_tests.json"
+    (throw (ex-info "Usage: kbb -M:core-vectors script_tests.json"
                     {})))
   (let [values (json/read-str (slurp path))
         tests (keep-indexed

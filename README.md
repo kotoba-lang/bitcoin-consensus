@@ -88,16 +88,16 @@ wire codecs, consensus values, BIP9, headers-first state, and scheduling remain
 portable Clojure/ClojureScript values.
 
 ```bash
-clojure -M:test
-clojure -M:lint
-clojure -M:coverage
-clojure -M:fuzz 21000000 5000     # replayable 15,000-target CI corpus
+kbb -M:test
+kbb -M:lint
+kbb -M:coverage
+kbb -M:fuzz 21000000 5000     # replayable 15,000-target CI corpus
 ./scripts/core_regtest_differential.sh # requires bitcoind + bitcoin-cli
 ./scripts/core_script_vectors.sh       # all pinned Core v31.1 corpora
-clojure -M:core-tx-vectors \
+kbb -M:core-tx-vectors \
   /path/to/bitcoin/src/test/data/tx_valid.json \
   /path/to/bitcoin/src/test/data/tx_invalid.json
-clojure -M:core-sighash-vectors \
+kbb -M:core-sighash-vectors \
   /path/to/bitcoin/src/test/data/sighash.json
 
 # Resume a real Core-backed historical range from a durable kernel checkpoint:

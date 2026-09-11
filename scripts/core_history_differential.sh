@@ -66,7 +66,7 @@ fi
     CONSENSUS_HISTORY_END="$end_height" \
     CONSENSUS_HISTORY_CHAINSTATE="$chainstate_path" \
     CONSENSUS_HISTORY_CHECKPOINT_INTERVAL="$checkpoint_interval" \
-    clojure -M -e '
+    kbb -M -e '
   (require (quote bitcoin.consensus.block)
            (quote bitcoin.consensus.chainstate)
            (quote bitcoin.consensus.storage)

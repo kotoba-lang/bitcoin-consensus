@@ -47,17 +47,17 @@ download_vector "tx_valid.json" "$tx_valid_sha256" "$tx_valid_file"
 download_vector "tx_invalid.json" "$tx_invalid_sha256" "$tx_invalid_file"
 download_vector "sighash.json" "$sighash_sha256" "$sighash_file"
 
-script_result="$(clojure -M:core-vectors "$script_file")"
+script_result="$(kbb -M:core-vectors "$script_file")"
 assert_result \
   "Script" "$script_result" \
   "{:vectors 1222, :passed 1222, :skipped 0, :failed 0}"
 
-tx_result="$(clojure -M:core-tx-vectors "$tx_valid_file" "$tx_invalid_file")"
+tx_result="$(kbb -M:core-tx-vectors "$tx_valid_file" "$tx_invalid_file")"
 assert_result \
   "transaction" "$tx_result" \
   "{:vectors 214, :passed 214, :skipped 0, :failed 0}"
 
-sighash_result="$(clojure -M:core-sighash-vectors "$sighash_file")"
+sighash_result="$(kbb -M:core-sighash-vectors "$sighash_file")"
 assert_result \
   "legacy sighash" "$sighash_result" \
   "{:vectors 500, :passed 500, :failed 0}"
