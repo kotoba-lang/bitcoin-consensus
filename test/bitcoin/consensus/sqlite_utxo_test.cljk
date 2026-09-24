@@ -3,7 +3,7 @@
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sqlite-utxo :as sqlite]
             [bitcoin.consensus.utxo :as utxo]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [kotobase.bitcoin.protocol :as header])
   (:import [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]

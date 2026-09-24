@@ -15,7 +15,7 @@
             [btc-crypto.core :as bitcoin-crypto]
             [btc-crypto.schnorr :as schnorr]
             [btc-crypto.tx :as bitcoin-tx]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [kotobase.bitcoin.protocol :as header]
             [eth-crypto.core :as eth]
             [sha256d.core :as sha256d])
