@@ -4,14 +4,11 @@
   Validation runs against an immutable overlay on one SQL transaction. A
   caller either commits the complete block delta and undo journal or rolls the
   transaction back; partially connected blocks are never observable."
-  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+  (:require [kotoba.sql.conn :as conn] [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.utxo :as utxo]
             [kotoba.lang.text :as str]
-            [kotobase.bitcoin.protocol :as header])
-  (:import [java.sql Connection PreparedStatement ResultSet]
-           [javax.sql DataSource]
-           [org.sqlite SQLiteDataSource]))
+            [kotobase.bitcoin.protocol :as header]))
 
 (def schema-version 7)
 (def maximum-pending-block-bytes 4000000)
@@ -98,40 +95,39 @@
 (defn- fail! [type message data]
   (codec/fail! type message data))
 
-(defn datasource ^SQLiteDataSource [path-or-url]
+(defn datasource [path-or-url]
   (let [value (str path-or-url)]
-    (doto (SQLiteDataSource.)
-      (.setUrl (if (str/starts-with? value "jdbc:sqlite:")
+    (conn/sqlite-datasource (if (str/starts-with? value "jdbc:sqlite:")
                  value
-                 (str "jdbc:sqlite:" value))))))
+                 (str "jdbc:sqlite:" value)))))
 
-(defn- execute-statement! [^Connection connection sql]
-  (with-open [statement (.createStatement connection)]
-    (.execute statement sql)))
+(defn- execute-statement! [connection sql]
+  (with-open [statement (conn/create-statement connection)]
+    (conn/execute! statement sql)))
 
-(defn- configure! [^Connection connection busy-timeout-ms]
+(defn- configure! [connection busy-timeout-ms]
   (execute-statement! connection "PRAGMA foreign_keys = ON")
   (execute-statement! connection "PRAGMA synchronous = FULL")
   (execute-statement! connection (str "PRAGMA busy_timeout = "
                                       (long busy-timeout-ms)))
   connection)
 
-(defn- bind! [^PreparedStatement statement params]
+(defn- bind! [statement params]
   (doseq [[index value] (map-indexed vector params)]
     (cond
-      (bytes? value) (.setBytes statement (inc index) value)
-      (nil? value) (.setObject statement (inc index) nil)
-      :else (.setObject statement (inc index) value)))
+      (conn/blob? value) (conn/set-bytes! statement (inc index) value)
+      (nil? value) (conn/set-object! statement (inc index) nil)
+      :else (conn/set-object! statement (inc index) value)))
   statement)
 
-(defn- execute! [^Connection connection sql params]
-  (with-open [statement (bind! (.prepareStatement connection sql) params)]
-    (.executeUpdate statement)))
+(defn- execute! [connection sql params]
+  (with-open [statement (bind! (conn/prepare connection sql) params)]
+    (conn/execute-update! statement)))
 
-(defn- first-row [^Connection connection sql params row-fn]
-  (with-open [statement (bind! (.prepareStatement connection sql) params)
-              result (.executeQuery statement)]
-    (when (.next result)
+(defn- first-row [connection sql params row-fn]
+  (with-open [statement (bind! (conn/prepare connection sql) params)
+              result (conn/execute-query statement)]
+    (when (conn/next! result)
       (row-fn result))))
 
 (defn- txid-bytes [txid]
@@ -150,13 +146,13 @@
              (conj! result
                     (bit-and 0xff (aget value index)))))))
 
-(defn- read-coin [^ResultSet result offset]
-  {:value (.getLong result offset)
-   :script-pubkey (bytes-vector (.getBytes result (inc offset)))
-   :height (.getLong result (+ offset 2))
-   :coinbase? (not (zero? (.getInt result (+ offset 3))))})
+(defn- read-coin [result offset]
+  {:value (conn/get-long result offset)
+   :script-pubkey (bytes-vector (conn/get-bytes result (inc offset)))
+   :height (conn/get-long result (+ offset 2))
+   :coinbase? (not (zero? (conn/get-int result (+ offset 3))))})
 
-(defn- sql-coin [^Connection connection [txid vout]]
+(defn- sql-coin [connection [txid vout]]
   (first-row
    connection
    "SELECT value, script, height, coinbase
@@ -164,9 +160,9 @@
    [(txid-bytes txid) (long vout)]
    #(read-coin % 1)))
 
-(defrecord SQLiteUTXO [^DataSource datasource busy-timeout-ms network])
+(defrecord SQLiteUTXO [datasource busy-timeout-ms network])
 
-(defrecord CoinOverlay [backend ^Connection connection base-count changes closed?]
+(defrecord CoinOverlay [backend connection base-count changes closed?]
   utxo/CoinStore
   (-coin-get [_ key]
     (when @closed?
@@ -197,24 +193,24 @@
         0 changes))))
 
 (defn- connection [^SQLiteUTXO backend]
-  (configure! (.getConnection ^DataSource (:datasource backend))
+  (configure! (conn/connection (:datasource backend))
               (:busy-timeout-ms backend)))
 
-(defn- meta-value [^Connection connection key]
+(defn- meta-value [connection key]
   (first-row connection
              "SELECT value FROM consensus_meta WHERE key = ?"
-             [key] #(.getString ^ResultSet % 1)))
+             [key] #(conn/get-string % 1)))
 
-(defn- put-meta! [^Connection connection key value]
+(defn- put-meta! [connection key value]
   (execute! connection
             "INSERT INTO consensus_meta(key, value) VALUES (?, ?)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value"
             [key (str value)]))
 
-(defn- undo-prune-height* [^Connection connection]
+(defn- undo-prune-height* [connection]
   (parse-long (or (meta-value connection "undo_prune_height") "-1")))
 
-(defn- initialize-undo-prune-height! [^Connection connection]
+(defn- initialize-undo-prune-height! [connection]
   (when-not (meta-value connection "undo_prune_height")
     ;; Legacy databases predate an explicit availability floor. Preserve every
     ;; existing journal and describe an already-missing prefix as unavailable;
@@ -223,9 +219,9 @@
           earliest
           (first-row
            connection "SELECT min(height) FROM consensus_undo_blocks" []
-           (fn [^ResultSet result]
-             (let [value (.getObject result 1)]
-               (when value (.longValue ^Number value)))))
+           (fn [result]
+             (let [value (conn/get-object result 1)]
+               (when value (conn/long-value ^Number value)))))
           floor (if earliest (dec earliest) height)]
       (put-meta! connection "undo_prune_height" (max -1 floor)))))
 
@@ -234,23 +230,23 @@
     (length(script) > 0 AND substr(script, 1, 1) = X'6A'))")
 
 (defn- unspendable-row-count
-  [^Connection connection table where-prefix]
+  [connection table where-prefix]
   (first-row
    connection
    (str "SELECT count(*) FROM " table " WHERE " where-prefix
         unspendable-script-sql)
    []
-   #(.getLong ^ResultSet % 1)))
+   #(conn/get-long % 1)))
 
 (defn- migrate-unspendable-coins!
   "Repair schema <=6 databases produced before oversized scripts matched
   Core's CScript::IsUnspendable rule. A spent unspendable coin in undo proves
   that an impossible spend was accepted, so that case fails closed to reindex."
-  [^Connection connection stored-version]
+  [connection stored-version]
   (when (and stored-version (< (parse-long stored-version) 7))
-    (let [auto-commit (.getAutoCommit connection)]
+    (let [auto-commit (conn/auto-commit? connection)]
       (try
-        (.setAutoCommit connection false)
+        (conn/set-auto-commit! connection false)
         (let [bad-undo
               (unspendable-row-count
                connection "consensus_undo" "kind = 0 AND ")]
@@ -265,15 +261,15 @@
          [])
         (let [actual
               (first-row connection "SELECT count(*) FROM consensus_coins" []
-                         #(.getLong ^ResultSet % 1))]
+                         #(conn/get-long % 1))]
           (put-meta! connection "coin_count" actual)
           (put-meta! connection "schema_version" schema-version))
-        (.commit connection)
+        (conn/commit! connection)
         (catch Throwable error
-          (.rollback connection)
+          (conn/rollback! connection)
           (throw error))
         (finally
-          (.setAutoCommit connection auto-commit))))))
+          (conn/set-auto-commit! connection auto-commit))))))
 
 (defn open
   "Open or initialize a network-bound UTXO database."
@@ -288,10 +284,10 @@
            {:busy-timeout-ms busy-timeout-ms}))
   (let [source (or datasource (when path
                                 (bitcoin.consensus.sqlite-utxo/datasource path)))]
-    (when-not (instance? DataSource source)
+    (when-not (conn/datasource? source)
       (fail! :bitcoin.consensus/sqlite-configuration
              "SQLite UTXO storage requires :path or :datasource." {}))
-    (with-open [connection (configure! (.getConnection ^DataSource source)
+    (with-open [connection (configure! (conn/connection source)
                                        busy-timeout-ms)]
       (execute-statement! connection "PRAGMA journal_mode = WAL")
       (execute-statement! connection "PRAGMA synchronous = FULL")
@@ -327,7 +323,7 @@
      :tip (meta-value connection "tip")
      :coin-count (parse-long (meta-value connection "coin_count"))}))
 
-(defn- undo-status* [^Connection connection]
+(defn- undo-status* [connection]
   (let [height (parse-long (meta-value connection "height"))
         floor (undo-prune-height* connection)
         summary
@@ -337,13 +333,13 @@
                  (SELECT count(*) FROM consensus_undo)
             FROM consensus_undo_blocks"
          []
-         (fn [^ResultSet result]
-           {:retained-undo-blocks (.getLong result 1)
+         (fn [result]
+           {:retained-undo-blocks (conn/get-long result 1)
             :earliest-undo-height
-            (some-> (.getObject result 2) ^Number .longValue)
+            (some-> (conn/get-object result 2) conn/long-value)
             :latest-undo-height
-            (some-> (.getObject result 3) ^Number .longValue)
-            :undo-rows (.getLong result 4)}))]
+            (some-> (conn/get-object result 3) conn/long-value)
+            :undo-rows (conn/get-long result 4)}))]
     (assoc summary
            :undo-pruned-through-height floor
            :available-reorg-depth (max 0 (- height floor)))))
@@ -355,7 +351,7 @@
     (undo-status* connection)))
 
 (defn- prune-undo-in-transaction!
-  [^Connection connection retain-blocks]
+  [connection retain-blocks]
   (when-not (and (integer? retain-blocks) (pos? retain-blocks))
     (fail! :bitcoin.consensus/undo-retention
            "Undo retention must be a positive block count."
@@ -381,17 +377,17 @@
   deeper valid chain requires rebuilding chainstate from authenticated history."
   [backend retain-blocks]
   (with-open [connection (connection backend)]
-    (let [auto-commit (.getAutoCommit connection)]
+    (let [auto-commit (conn/auto-commit? connection)]
       (try
-        (.setAutoCommit connection false)
+        (conn/set-auto-commit! connection false)
         (let [result (prune-undo-in-transaction! connection retain-blocks)]
-          (.commit connection)
+          (conn/commit! connection)
           result)
         (catch Throwable error
-          (.rollback connection)
+          (conn/rollback! connection)
           (throw error))
         (finally
-          (.setAutoCommit connection auto-commit))))))
+          (conn/set-auto-commit! connection auto-commit))))))
 
 (defn lookup [backend key]
   (with-open [connection (connection backend)]
@@ -402,19 +398,19 @@
   [backend]
   (let [connection (connection backend)]
     (try
-      (.setAutoCommit connection false)
+      (conn/set-auto-commit! connection false)
       (let [count (parse-long (or (meta-value connection "coin_count") "0"))]
         (->CoinOverlay backend connection count {} (atom false)))
       (catch Throwable error
-        (.close connection)
+        (conn/close! connection)
         (throw error)))))
 
 (defn rollback!
   [^CoinOverlay view]
   (when (compare-and-set! (:closed? view) false true)
     (try
-      (.rollback ^Connection (:connection view))
-      (finally (.close ^Connection (:connection view)))))
+      (conn/rollback! (:connection view))
+      (finally (conn/close! (:connection view)))))
   nil)
 
 (declare commit-block!)
@@ -461,9 +457,9 @@
    (long (:height coin)) (if (:coinbase? coin) 1 0)])
 
 (defn- insert-coin-statement!
-  [^PreparedStatement statement outpoint coin]
+  [statement outpoint coin]
   (bind! statement (coin-params outpoint coin))
-  (.executeUpdate statement))
+  (conn/execute-update! statement))
 
 (defn- insert-coin! [connection outpoint coin]
   (execute! connection upsert-coin-sql (coin-params outpoint coin)))
@@ -502,7 +498,7 @@
         (when coin (if (:coinbase? coin) 1 0))]))))
 
 (defn- write-host-state! [connection bytes]
-  (when-not (bytes? bytes)
+  (when-not (conn/blob? bytes)
     (fail! :bitcoin.consensus/sqlite-host-state
            "Atomic host state must be a byte array." {}))
   (execute!
@@ -550,7 +546,7 @@
        raw chainwork
        [taproot-code (node-flags node)])))))
 
-(defn- write-header-nodes! [^Connection connection nodes]
+(defn- write-header-nodes! [connection nodes]
   (doseq [batch (partition-all 500 nodes)]
     (let [placeholders
           (str/join "," (repeat (count batch) "(?, ?)"))
@@ -567,7 +563,7 @@
       (execute! connection sql params))))
 
 (defn- write-produced-header-nodes!
-  [^Connection connection produce!]
+  [connection produce!]
   (let [pending (volatile! [])
         flush!
         (fn []
@@ -633,15 +629,15 @@
 
 (defn- blob-header-nodes
   [backend]
-  (with-open [^Connection connection (connection backend)
-              ^PreparedStatement statement
-              (.prepareStatement
+  (with-open [connection (connection backend)
+              statement
+              (conn/prepare
                connection
                "SELECT node FROM consensus_header_nodes")
-              ^ResultSet result (.executeQuery statement)]
+              result (conn/execute-query statement)]
     (loop [nodes (transient {})]
-      (if (.next result)
-        (let [node (decode-header-node (.getBytes result 1))]
+      (if (conn/next! result)
+        (let [node (decode-header-node (conn/get-bytes result 1))]
           (recur (assoc! nodes (:hash node) node)))
         (persistent! nodes)))))
 
@@ -659,16 +655,16 @@
   (when-not (ifn? consume!)
     (fail! :bitcoin.consensus/sqlite-header-consumer
            "Normalized header consumer must be callable." {}))
-  (with-open [^Connection connection (connection backend)
-              ^PreparedStatement statement
-              (.prepareStatement
+  (with-open [connection (connection backend)
+              statement
+              (conn/prepare
                connection
                "SELECT node FROM consensus_header_nodes")
-              ^ResultSet result (.executeQuery statement)]
+              result (conn/execute-query statement)]
     (loop [count 0]
-      (if (.next result)
+      (if (conn/next! result)
         (do
-          (consume! (decode-header-node (.getBytes result 1)))
+          (consume! (decode-header-node (conn/get-bytes result 1)))
           (recur (inc count)))
         count))))
 
@@ -687,14 +683,14 @@
      connection
      "SELECT node FROM consensus_header_nodes WHERE hash = ?"
      [hash]
-     #(decode-header-node (.getBytes ^ResultSet % 1)))))
+     #(decode-header-node (conn/get-bytes % 1)))))
 
 (defn- prepared-header-node
-  [^PreparedStatement statement hash]
-  (.setString statement 1 hash)
-  (with-open [result (.executeQuery statement)]
-    (when (.next result)
-      (let [node (decode-header-node (.getBytes result 1))]
+  [statement hash]
+  (conn/set-string! statement 1 hash)
+  (with-open [result (conn/execute-query statement)]
+    (when (conn/next! result)
+      (let [node (decode-header-node (conn/get-bytes result 1))]
         (when-not (= hash (:hash node))
           (fail! :bitcoin.consensus/sqlite-header-hash
                  "Normalized header key differs from its raw hash."
@@ -718,7 +714,7 @@
             :maximum-height maximum-height}))
   (with-open [connection (connection backend)
               statement
-              (.prepareStatement
+              (conn/prepare
                connection
                "SELECT node FROM consensus_header_nodes WHERE hash = ?")]
     (loop [hash tip-hash previous-height nil result {}]
@@ -761,7 +757,7 @@
            {:tip tip-hash}))
   (with-open [connection (connection backend)
               statement
-              (.prepareStatement
+              (conn/prepare
                connection
                "SELECT node FROM consensus_header_nodes WHERE hash = ?")]
     (loop [hash tip-hash result #{}]
@@ -787,7 +783,7 @@
      connection
      "SELECT count(*) FROM consensus_header_nodes"
      []
-     #(.getLong ^ResultSet % 1))))
+     #(conn/get-long % 1))))
 
 (defn header-tips
   "Return every normalized header leaf without retaining the full graph.
@@ -796,51 +792,51 @@
   durable leaf tracking. Parent hashes are staged in a connection-local
   temporary table, keeping JVM memory proportional to the number of leaves."
   [backend]
-  (with-open [^Connection connection (connection backend)]
+  (with-open [connection (connection backend)]
     (execute-statement!
      connection
      "CREATE TEMP TABLE consensus_header_parents (
         hash TEXT PRIMARY KEY
       ) WITHOUT ROWID")
     (with-open [select
-                (.prepareStatement
+                (conn/prepare
                  connection
                  "SELECT node FROM consensus_header_nodes")
                 insert
-                (.prepareStatement
+                (conn/prepare
                  connection
                  "INSERT OR IGNORE INTO consensus_header_parents(hash)
                     VALUES (?)")
-                result (.executeQuery select)]
+                result (conn/execute-query select)]
       (loop [pending 0]
-        (if (.next result)
+        (if (conn/next! result)
           (if-let [parent
-                   (:parent (decode-header-node (.getBytes result 1)))]
+                   (:parent (decode-header-node (conn/get-bytes result 1)))]
             (do
-              (.setString insert 1 parent)
-              (.addBatch insert)
+              (conn/set-string! insert 1 parent)
+              (conn/add-batch! insert)
               (let [pending (inc pending)]
                 (if (= 1000 pending)
                   (do
-                    (.executeBatch insert)
-                    (.clearBatch insert)
+                    (conn/execute-batch! insert)
+                    (conn/clear-batch! insert)
                     (recur 0))
                   (recur pending))))
             (recur pending))
           (when (pos? pending)
-            (.executeBatch insert)))))
+            (conn/execute-batch! insert)))))
     (with-open [statement
-                (.prepareStatement
+                (conn/prepare
                  connection
                  "SELECT header.hash
                     FROM consensus_header_nodes AS header
                     LEFT JOIN consensus_header_parents AS parent
                       ON parent.hash = header.hash
                    WHERE parent.hash IS NULL")
-                result (.executeQuery statement)]
+                result (conn/execute-query statement)]
       (loop [tips #{}]
-        (if (.next result)
-          (recur (conj tips (.getString result 1)))
+        (if (conn/next! result)
+          (recur (conj tips (conn/get-string result 1)))
           tips)))))
 
 (defn header-integrity-check!
@@ -852,7 +848,7 @@
   then parent relationships are checked by one SQL join. The source database
   is never modified and the JVM never retains a mainnet-sized graph."
   [backend]
-  (with-open [^Connection connection (connection backend)]
+  (with-open [connection (connection backend)]
     (execute-statement! connection "PRAGMA temp_store = FILE")
     (execute-statement!
      connection
@@ -863,31 +859,31 @@
         chainwork BLOB NOT NULL CHECK(length(chainwork) = 32),
         bits INTEGER NOT NULL
       ) WITHOUT ROWID")
-    (let [auto-commit (.getAutoCommit connection)
+    (let [auto-commit (conn/auto-commit? connection)
           work-cache (volatile! {})]
       (try
-        (.setAutoCommit connection false)
+        (conn/set-auto-commit! connection false)
         (let [row-count
-              (with-open [^PreparedStatement scan
-                          (.prepareStatement
+              (with-open [scan
+                          (conn/prepare
                            connection
                            "SELECT hash, node FROM consensus_header_nodes")
-                          ^PreparedStatement insert
-                          (.prepareStatement
+                          insert
+                          (conn/prepare
                            connection
                            "INSERT INTO consensus_header_audit
                               (hash, parent_hash, height, chainwork, bits)
                             VALUES (?, ?, ?, ?, ?)")
-                          ^ResultSet result (.executeQuery scan)]
+                          result (conn/execute-query scan)]
                 (loop [count 0 pending 0]
-                  (if-not (.next result)
+                  (if-not (conn/next! result)
                     (do
                       (when (pos? pending)
-                        (.executeBatch insert)
-                        (.clearBatch insert))
+                        (conn/execute-batch! insert)
+                        (conn/clear-batch! insert))
                       count)
-                    (let [database-hash (.getString result 1)
-                          node (decode-header-node (.getBytes result 2))
+                    (let [database-hash (conn/get-string result 1)
+                          node (decode-header-node (conn/get-bytes result 2))
                           decoded
                           (header/decode-block-header
                            (get-in node [:header :bytes]))
@@ -902,24 +898,24 @@
                          "Stored normalized header hash does not match its raw bytes."
                          {:stored stored-hash
                           :actual (:hash-hex decoded)}))
-                      (.setString insert 1 stored-hash)
-                      (.setString insert 2 (:parent node))
-                      (.setLong insert 3 (:height node))
-                      (.setBytes
+                      (conn/set-string! insert 1 stored-hash)
+                      (conn/set-string! insert 2 (:parent node))
+                      (conn/set-long! insert 3 (:height node))
+                      (conn/set-bytes!
                        insert 4
                        (byte-array
                         (map unchecked-byte (:chainwork node))))
-                      (.setLong insert 5 (:bits decoded))
-                      (.addBatch insert)
+                      (conn/set-long! insert 5 (:bits decoded))
+                      (conn/add-batch! insert)
                       (let [pending (inc pending)]
                         (if (= 1000 pending)
-                          (do (.executeBatch insert)
-                              (.clearBatch insert)
+                          (do (conn/execute-batch! insert)
+                              (conn/clear-batch! insert)
                               (recur (inc count) 0))
                           (recur (inc count) pending)))))))
               audited-count
-              (with-open [^PreparedStatement statement
-                          (.prepareStatement
+              (with-open [statement
+                          (conn/prepare
                            connection
                            "SELECT child.hash, child.parent_hash,
                                    child.height, child.chainwork, child.bits,
@@ -927,19 +923,19 @@
                               FROM consensus_header_audit AS child
                               LEFT JOIN consensus_header_audit AS parent
                                 ON parent.hash = child.parent_hash")
-                          ^ResultSet result (.executeQuery statement)]
+                          result (conn/execute-query statement)]
                 (loop [count 0]
-                  (if-not (.next result)
+                  (if-not (conn/next! result)
                     count
-                    (let [hash (.getString result 1)
-                          parent (.getString result 2)
-                          height (.getLong result 3)
-                          chainwork (bytes-vector (.getBytes result 4))
-                          bits (.getLong result 5)
-                          parent-height (.getLong result 6)
-                          missing-parent? (.wasNull result)
+                    (let [hash (conn/get-string result 1)
+                          parent (conn/get-string result 2)
+                          height (conn/get-long result 3)
+                          chainwork (bytes-vector (conn/get-bytes result 4))
+                          bits (conn/get-long result 5)
+                          parent-height (conn/get-long result 6)
+                          missing-parent? (conn/was-null? result)
                           parent-chainwork
-                          (some-> (.getBytes result 7) bytes-vector)
+                          (some-> (conn/get-bytes result 7) bytes-vector)
                           work
                           (or (get @work-cache bits)
                               (let [value (header/header-work bits)]
@@ -974,13 +970,13 @@
             (fail! :bitcoin.consensus/sqlite-header-audit
                    "Header audit row counts differ between passes."
                    {:headers row-count :audited audited-count}))
-          (.commit connection)
+          (conn/commit! connection)
           {:header-integrity :ok :header-nodes row-count})
         (catch Throwable error
-          (.rollback connection)
+          (conn/rollback! connection)
           (throw error))
         (finally
-          (.setAutoCommit connection auto-commit))))))
+          (conn/set-auto-commit! connection auto-commit))))))
 
 (defn host-state
   "Return the atomically committed host-state bytes, if present."
@@ -988,7 +984,7 @@
   (with-open [connection (connection backend)]
     (first-row connection
                "SELECT bytes FROM consensus_host_state WHERE id = 1"
-               [] #(.getBytes ^ResultSet % 1))))
+               [] #(conn/get-bytes % 1))))
 
 (defn undo
   "Read one durable active-chain undo journal."
@@ -999,32 +995,32 @@
            connection
            "SELECT previous_height FROM consensus_undo_blocks
               WHERE block_hash = ?"
-           [block-hash] #(.getLong ^ResultSet % 1))
+           [block-hash] #(conn/get-long % 1))
           rows
           (with-open [statement
                       (bind!
-                       (.prepareStatement
+                       (conn/prepare
                         connection
                         "SELECT kind, txid, vout, value, script, height,
                                 coinbase
                            FROM consensus_undo WHERE block_hash = ?
                            ORDER BY sequence")
                        [block-hash])
-                      result (.executeQuery statement)]
+                      result (conn/execute-query statement)]
             (loop [values []]
-              (if (.next result)
+              (if (conn/next! result)
                 (recur
                  (conj
                   values
-                  {:kind (.getInt result 1)
-                   :key [(bytes-vector (.getBytes result 2))
-                         (.getLong result 3)]
+                  {:kind (conn/get-int result 1)
+                   :key [(bytes-vector (conn/get-bytes result 2))
+                         (conn/get-long result 3)]
                    :coin
-                   (when (zero? (.getInt result 1))
-                     {:value (.getLong result 4)
-                      :script-pubkey (bytes-vector (.getBytes result 5))
-                      :height (.getLong result 6)
-                      :coinbase? (not (zero? (.getInt result 7)))})}))
+                   (when (zero? (conn/get-int result 1))
+                     {:value (conn/get-long result 4)
+                      :script-pubkey (bytes-vector (conn/get-bytes result 5))
+                      :height (conn/get-long result 6)
+                      :coinbase? (not (zero? (conn/get-int result 7)))})}))
                 values)))]
       (when (some? previous-height)
         {:height previous-height
@@ -1043,7 +1039,7 @@
       (insert-coin! connection key value))))
 
 (defn- fail-missing-undo!
-  [^Connection connection block-hash height]
+  [connection block-hash height]
   (let [floor (undo-prune-height* connection)
         pruned? (<= height floor)]
     (fail!
@@ -1064,9 +1060,9 @@
    "SELECT count(*), COALESCE(sum(length(raw)), 0)
       FROM consensus_pending_blocks"
    []
-   (fn [^ResultSet result]
-     {:pending-blocks (.getLong result 1)
-      :pending-bytes (.getLong result 2)})))
+   (fn [result]
+     {:pending-blocks (conn/get-long result 1)
+      :pending-bytes (conn/get-long result 2)})))
 
 (defn pending-status
   "Return bounded side-branch staging utilization."
@@ -1082,20 +1078,20 @@
      connection
      "SELECT raw FROM consensus_pending_blocks WHERE hash = ?"
      [hash]
-     #(.getBytes ^ResultSet % 1))))
+     #(conn/get-bytes % 1))))
 
 (defn pending-block-hashes
   "Return the bounded set of staged side-branch block hashes."
   [backend]
   (with-open [connection (connection backend)
               statement
-              (.prepareStatement
+              (conn/prepare
                connection
                "SELECT hash FROM consensus_pending_blocks")
-              result (.executeQuery statement)]
+              result (conn/execute-query statement)]
     (loop [hashes []]
-      (if (.next result)
-        (recur (conj hashes (.getString result 1)))
+      (if (conn/next! result)
+        (recur (conj hashes (conn/get-string result 1)))
         hashes))))
 
 (defn- validate-pending-options!
@@ -1119,13 +1115,13 @@
   (doseq [[hash raw] store]
     (when-not (and (string? hash)
                    (re-matches #"[0-9a-f]{64}" hash)
-                   (bytes? raw)
+                   (conn/blob? raw)
                    (<= 81 (alength ^bytes raw)
                        maximum-pending-block-bytes))
       (fail! :bitcoin.consensus/pending-block
              "Staged block is malformed or exceeds consensus size bounds."
              {:hash hash
-              :bytes (when (bytes? raw) (alength ^bytes raw))})))
+              :bytes (when (conn/blob? raw) (alength ^bytes raw))})))
   {:store store :delete (vec (distinct delete))
    :maximum-count maximum-count :maximum-bytes maximum-bytes})
 
@@ -1176,9 +1172,9 @@
   side-branch blocks. `:store` maps display hashes to raw byte arrays."
   [backend expected-tip expected-height bytes nodes pending-options]
   (with-open [connection (connection backend)]
-    (let [auto-commit (.getAutoCommit connection)]
+    (let [auto-commit (conn/auto-commit? connection)]
       (try
-        (.setAutoCommit connection false)
+        (conn/set-auto-commit! connection false)
         (let [actual-tip (meta-value connection "tip")
               actual-height (parse-long (meta-value connection "height"))]
           (when-not (and (= expected-tip actual-tip)
@@ -1195,14 +1191,14 @@
           (write-host-state! connection bytes)
           (fault-point! :host-update/after-host)
           (fault-point! :host-update/before-commit)
-          (.commit connection)
+          (conn/commit! connection)
           (fault-point! :host-update/after-commit)
           true)
         (catch Throwable error
-          (.rollback connection)
+          (conn/rollback! connection)
           (throw error))
         (finally
-          (.setAutoCommit connection auto-commit))))))
+          (conn/set-auto-commit! connection auto-commit))))))
 
 (defn import-snapshot!
   "Stream an authenticated Core v2 AssumeUTXO snapshot directly into SQLite.
@@ -1218,13 +1214,13 @@
   ([backend source header-at-height options]
    (with-open [connection (connection backend)
                coin-statement
-               (.prepareStatement ^Connection connection upsert-coin-sql)]
-     (let [auto-commit (.getAutoCommit connection)]
+               (conn/prepare connection upsert-coin-sql)]
+     (let [auto-commit (conn/auto-commit? connection)]
        (try
-         (.setAutoCommit connection false)
+         (conn/set-auto-commit! connection false)
          (let [current-count
                (first-row connection "SELECT count(*) FROM consensus_coins" []
-                          #(.getLong ^ResultSet % 1))]
+                          #(conn/get-long % 1))]
            (when-not (zero? current-count)
              (fail! :bitcoin.consensus/sqlite-snapshot-nonempty
                     "AssumeUTXO import requires an empty UTXO database."
@@ -1262,13 +1258,13 @@
                 (if header-nodes-fn
                   (header-nodes-fn loaded)
                   header-nodes)))
-             (.commit connection)
+             (conn/commit! connection)
              (:snapshot loaded)))
          (catch Throwable error
-           (.rollback connection)
+           (conn/rollback! connection)
            (throw error))
          (finally
-           (.setAutoCommit connection auto-commit)))))))
+           (conn/set-auto-commit! connection auto-commit)))))))
 
 (defn commit-block!
   "Atomically commit a validated overlay, its reversible undo, and new tip.
@@ -1276,7 +1272,7 @@
   [^CoinOverlay view
    {:keys [block-hash parent-hash height previous-height undo
            retain-undo-blocks]}]
-  (let [^Connection connection (:connection view)]
+  (let [connection (:connection view)]
     (when @(:closed? view)
       (fail! :bitcoin.consensus/closed-utxo-view
              "UTXO validation view is already closed." {}))
@@ -1309,16 +1305,16 @@
             (prune-undo-in-transaction! connection retain-undo-blocks))
           (fault-point! :commit-block/after-prune)
           (fault-point! :commit-block/before-commit)
-          (.commit connection)
+          (conn/commit! connection)
           (fault-point! :commit-block/after-commit)
           (reset! (:closed? view) true)
           {:height height :tip block-hash :coin-count next-count}))
       (catch Throwable error
-        (.rollback connection)
+        (conn/rollback! connection)
         (reset! (:closed? view) true)
         (throw error))
       (finally
-        (.close connection)))))
+        (conn/close! connection)))))
 
 (defn commit-transition!
   "Atomically commit a most-work reorganization and checksummed host state.
@@ -1330,7 +1326,7 @@
    {:keys [expected-tip expected-height new-tip new-height
            detach attach host-state-bytes header-nodes pending-delete
            retain-undo-blocks]}]
-  (let [^Connection connection (:connection view)]
+  (let [connection (:connection view)]
     (when @(:closed? view)
       (fail! :bitcoin.consensus/closed-utxo-view
              "UTXO validation view is already closed." {}))
@@ -1358,10 +1354,10 @@
                            FROM consensus_undo_blocks
                           WHERE block_hash = ?"
                         [block-hash]
-                        (fn [^ResultSet result]
-                          {:parent (.getString result 1)
-                           :height (.getLong result 2)
-                           :previous-height (.getLong result 3)}))]
+                        (fn [result]
+                          {:parent (conn/get-string result 1)
+                           :height (conn/get-long result 2)
+                           :previous-height (conn/get-long result 3)}))]
                    (when-not (and row (= current-height (:height row)))
                      (fail-missing-undo!
                       connection block-hash current-height))
@@ -1411,25 +1407,25 @@
             (prune-undo-in-transaction! connection retain-undo-blocks))
           (fault-point! :transition/after-prune)
           (fault-point! :transition/before-commit)
-          (.commit connection)
+          (conn/commit! connection)
           (fault-point! :transition/after-commit)
           (reset! (:closed? view) true)
           {:height new-height :tip new-tip :coin-count next-count
            :detached (count detach) :attached (count attach)}))
       (catch Throwable error
-        (.rollback connection)
+        (conn/rollback! connection)
         (reset! (:closed? view) true)
         (throw error))
       (finally
-        (.close connection)))))
+        (conn/close! connection)))))
 
 (defn disconnect-tip!
   "Atomically reverse the current tip using its durable undo journal."
   [backend expected-block-hash]
   (with-open [connection (connection backend)]
-    (let [auto-commit (.getAutoCommit connection)]
+    (let [auto-commit (conn/auto-commit? connection)]
       (try
-        (.setAutoCommit connection false)
+        (conn/set-auto-commit! connection false)
         (let [tip (meta-value connection "tip")
               block
               (first-row
@@ -1437,9 +1433,9 @@
                "SELECT parent_hash, previous_height
                   FROM consensus_undo_blocks WHERE block_hash = ?"
                [expected-block-hash]
-               (fn [^ResultSet result]
-                 {:parent (.getString result 1)
-                  :height (.getLong result 2)}))]
+               (fn [result]
+                 {:parent (conn/get-string result 1)
+                  :height (conn/get-long result 2)}))]
           (when-not (= expected-block-hash tip)
             (fail! :bitcoin.consensus/sqlite-stale-tip
                    "Refusing to disconnect a non-tip block."
@@ -1450,49 +1446,49 @@
              (parse-long (meta-value connection "height"))))
           (with-open [statement
                       (bind!
-                       (.prepareStatement
+                       (conn/prepare
                         connection
                         "SELECT kind, txid, vout, value, script, height, coinbase
                            FROM consensus_undo WHERE block_hash = ?
                            ORDER BY sequence DESC")
                        [expected-block-hash])
-                      result (.executeQuery statement)]
+                      result (conn/execute-query statement)]
             (loop []
-              (when (.next result)
-                (let [kind (.getInt result 1)
-                      key [(bytes-vector (.getBytes result 2))
-                           (.getLong result 3)]]
+              (when (conn/next! result)
+                (let [kind (conn/get-int result 1)
+                      key [(bytes-vector (conn/get-bytes result 2))
+                           (conn/get-long result 3)]]
                   (if (= kind 1)
                     (delete-coin! connection key)
                     (insert-coin!
                      connection key
-                     {:value (.getLong result 4)
-                      :script-pubkey (bytes-vector (.getBytes result 5))
-                      :height (.getLong result 6)
-                      :coinbase? (not (zero? (.getInt result 7)))})))
+                     {:value (conn/get-long result 4)
+                      :script-pubkey (bytes-vector (conn/get-bytes result 5))
+                      :height (conn/get-long result 6)
+                      :coinbase? (not (zero? (conn/get-int result 7)))})))
                 (recur))))
           (execute! connection
                     "DELETE FROM consensus_undo_blocks WHERE block_hash = ?"
                     [expected-block-hash])
           (let [next-count
                 (first-row connection "SELECT count(*) FROM consensus_coins" []
-                           #(.getLong ^ResultSet % 1))]
+                           #(conn/get-long % 1))]
             (put-meta! connection "height" (:height block))
             (if-let [parent (:parent block)]
               (put-meta! connection "tip" parent)
               (execute! connection
                         "DELETE FROM consensus_meta WHERE key = 'tip'" []))
             (put-meta! connection "coin_count" next-count)
-            (.commit connection)
+            (conn/commit! connection)
             {:height (:height block) :tip (:parent block)
              :coin-count next-count}))
         (catch Throwable error
-          (.rollback connection)
+          (conn/rollback! connection)
           (throw error))
         (finally
-          (.setAutoCommit connection auto-commit))))))
+          (conn/set-auto-commit! connection auto-commit))))))
 
-(defn- undo-integrity-check! [^Connection connection]
+(defn- undo-integrity-check! [connection]
   (let [height (parse-long (meta-value connection "height"))
         tip (meta-value connection "tip")
         {:keys [retained-undo-blocks earliest-undo-height
@@ -1505,7 +1501,7 @@
          connection
          "SELECT count(*) FROM consensus_undo_blocks
            WHERE previous_height <> height - 1"
-         [] #(.getLong ^ResultSet % 1))
+         [] #(conn/get-long % 1))
         broken-links
         (first-row
          connection
@@ -1517,13 +1513,13 @@
              AND (parent.block_hash IS NULL
                   OR parent.height <> child.previous_height)"
          [(inc undo-pruned-through-height)]
-         #(.getLong ^ResultSet % 1))
+         #(conn/get-long % 1))
         retained-tip
         (when (pos? expected)
           (first-row
            connection
            "SELECT block_hash FROM consensus_undo_blocks WHERE height = ?"
-           [height] #(.getString ^ResultSet % 1)))]
+           [height] #(conn/get-string % 1)))]
     (when-not
      (and (<= -1 undo-pruned-through-height height)
           (= expected retained-undo-blocks)
@@ -1551,10 +1547,10 @@
   (with-open [connection (connection backend)]
     (let [integrity
           (first-row connection "PRAGMA integrity_check" []
-                     #(.getString ^ResultSet % 1))
+                     #(conn/get-string % 1))
           actual
           (first-row connection "SELECT count(*) FROM consensus_coins" []
-                     #(.getLong ^ResultSet % 1))
+                     #(conn/get-long % 1))
           unspendable-coins
           (unspendable-row-count connection "consensus_coins" "")
           unspendable-undo
@@ -1582,15 +1578,15 @@
   consumed inside this call so JDBC resources cannot escape."
   [backend reduce-fn initial]
   (with-open [connection (connection backend)
-              statement (.prepareStatement
+              statement (conn/prepare
                          connection
                          "SELECT txid, vout, value, script, height, coinbase
                             FROM consensus_coins ORDER BY txid, vout")
-              result (.executeQuery statement)]
+              result (conn/execute-query statement)]
     (loop [acc initial]
-      (if (.next result)
+      (if (conn/next! result)
         (let [entry
-              [[(bytes-vector (.getBytes result 1)) (.getLong result 2)]
+              [[(bytes-vector (conn/get-bytes result 1)) (conn/get-long result 2)]
                (read-coin result 3)]
               next (reduce-fn acc entry)]
           (if (reduced? next) @next (recur next)))
