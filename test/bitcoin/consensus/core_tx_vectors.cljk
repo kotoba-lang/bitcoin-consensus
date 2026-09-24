@@ -3,8 +3,8 @@
   (:require [bitcoin.consensus.core-vectors :as core]
             [bitcoin.consensus.script :as script]
             [bitcoin.consensus.transaction :as transaction]
-            [clojure.data.json :as json]
-            [clojure.set :as set]
+            [kotoba.json :as json]
+            [kotoba.lang.coll :as set]
             [kotoba.lang.text :as string])
   (:gen-class))
 
