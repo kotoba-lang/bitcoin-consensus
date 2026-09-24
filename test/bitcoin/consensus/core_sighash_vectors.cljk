@@ -2,7 +2,7 @@
   "Adapter for Bitcoin Core's official legacy sighash.json corpus."
   (:require [bitcoin.consensus.sighash :as sighash]
             [bitcoin.consensus.transaction :as transaction]
-            [clojure.data.json :as json])
+            [kotoba.json :as json])
   (:gen-class))
 
 (defn- hex-bytes [value]

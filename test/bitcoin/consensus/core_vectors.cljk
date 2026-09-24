@@ -4,11 +4,11 @@
   The harness intentionally runs only flag combinations implemented by this
   consensus kernel. Unsupported policy flags are reported as skipped rather
   than silently ignored."
-  (:require [bitcoin.consensus.script :as script]
+  (:require [kotoba.bytes :as kbytes] [bitcoin.consensus.script :as script]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.transaction :as transaction]
             [btc-crypto.schnorr :as schnorr]
-            [clojure.data.json :as json]
+            [kotoba.json :as json]
             [kotoba.lang.text :as string]
             [sha256d.core :as sha256d])
   (:gen-class))
@@ -110,7 +110,7 @@
     (and (string/starts-with? token "'")
          (string/ends-with? token "'"))
     (script/push-data
-     (mapv int (.getBytes (subs token 1 (dec (count token))) "UTF-8")))
+     (mapv int (kbytes/utf8-bytes (subs token 1 (dec (count token))))))
 
     (re-matches #"-?[0-9]+" token)
     (let [number (parse-long token)]
