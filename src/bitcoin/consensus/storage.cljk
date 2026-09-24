@@ -1,7 +1,7 @@
 (ns bitcoin.consensus.storage
   "Checksummed, atomic JVM persistence for pure chainstate values."
   (:require [bitcoin.consensus.codec :as codec]
-            [clojure.edn :as edn])
+            [kotoba.lang.edn :as edn])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.channels FileChannel)
            (java.nio.file AtomicMoveNotSupportedException Files LinkOption
