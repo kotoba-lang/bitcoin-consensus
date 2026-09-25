@@ -1,6 +1,6 @@
 (ns bitcoin.consensus.signet
   "BIP325 block-challenge extraction and Script verification."
-  (:require [bitcoin.consensus.block :as block]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.block :as block]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.script :as script]
             [bitcoin.consensus.transaction :as transaction]
@@ -146,7 +146,7 @@
        (try
          (script/verify-input to-sign 0 coin block-script-flags)
          true
-         (catch clojure.lang.ExceptionInfo error
+         (catch kerror/ExceptionInfo error
            (codec/fail! :bitcoin.consensus/bad-signet-solution
                         "Signet block challenge solution is invalid."
                         {:cause (:type (ex-data error))})))))))

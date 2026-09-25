@@ -1,6 +1,6 @@
 (ns bitcoin.consensus.core-tx-vectors
   "Adapter for Bitcoin Core's official tx_valid/tx_invalid JSON vectors."
-  (:require [bitcoin.consensus.core-vectors :as core]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.core-vectors :as core]
             [bitcoin.consensus.script :as script]
             [bitcoin.consensus.transaction :as transaction]
             [kotoba.json :as json]
@@ -45,7 +45,7 @@
   (try
     (transaction/validate-context-free! value)
     true
-    (catch clojure.lang.ExceptionInfo _ false)))
+    (catch kerror/ExceptionInfo _ false)))
 
 (defn- scripts-valid? [value coins flags]
   (and (every? some? coins)
@@ -56,7 +56,7 @@
            (try
              (script/verify-input value index coin flags)
              true
-             (catch clojure.lang.ExceptionInfo _ false)))
+             (catch kerror/ExceptionInfo _ false)))
          coins))))
 
 (defn- valid-vector [index [inputs transaction-hex exclusions]]
@@ -97,7 +97,7 @@
             {:status :failed :index index :kind :invalid
              :flags flag-source :reason :unexpected-script-success}
             {:status :passed}))))
-    (catch clojure.lang.ExceptionInfo _
+    (catch kerror/ExceptionInfo _
       {:status :passed})
     (catch Throwable error
       {:status :failed :index index :kind :invalid

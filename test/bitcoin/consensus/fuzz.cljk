@@ -1,7 +1,7 @@
 (ns bitcoin.consensus.fuzz
   "Deterministic, structure-biased fuzzing for consensus wire and Script input."
   (:refer-clojure :exclude [run!])
-  (:require [bitcoin.consensus.block :as block]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.block :as block]
             [bitcoin.consensus.script :as script]
             [bitcoin.consensus.transaction :as transaction])
   (:import [java.util Random]))
@@ -91,7 +91,7 @@
   [target seed case-index value operation]
   (try
     (operation)
-    (catch clojure.lang.ExceptionInfo error
+    (catch kerror/ExceptionInfo error
       (when-not (typed-consensus-error? error)
         (throw
          (ex-info "Fuzz target returned an untyped consensus failure."

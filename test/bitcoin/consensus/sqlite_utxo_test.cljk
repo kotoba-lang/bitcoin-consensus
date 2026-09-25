@@ -1,5 +1,5 @@
 (ns bitcoin.consensus.sqlite-utxo-test
-  (:require [bitcoin.consensus.assumeutxo :as assumeutxo]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sqlite-utxo :as sqlite]
             [bitcoin.consensus.utxo :as utxo]
@@ -207,7 +207,7 @@
                   (ex-data
                    (try
                      (sqlite/open {:path path :network :testnet})
-                     (catch clojure.lang.ExceptionInfo error error)))))))))))
+                     (catch kerror/ExceptionInfo error error)))))))))))
 
 (deftest schema-seven-prunes-legacy-unspendable-coins
   (with-database
@@ -256,7 +256,7 @@
       (let [error
             (try
               (sqlite/open {:path path :network :regtest})
-              (catch clojure.lang.ExceptionInfo failure failure))]
+              (catch kerror/ExceptionInfo failure failure))]
         (is (= :bitcoin.consensus/sqlite-unspendable-undo
                (:type (ex-data error))))
         (is (= :reindex-from-authenticated-history
@@ -303,7 +303,7 @@
         (let [error
               (try
                 (sqlite/disconnect-tip! backend "pruned-2")
-                (catch clojure.lang.ExceptionInfo failure failure))]
+                (catch kerror/ExceptionInfo failure failure))]
           (is (= :bitcoin.consensus/undo-pruned
                  (:type (ex-data error))))
           (is (= :reindex-from-authenticated-history
@@ -315,7 +315,7 @@
                 (ex-data
                  (try
                    (sqlite/prune-undo! backend 0)
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (is (= :ok (:undo-integrity (sqlite/integrity-check! backend))))))))
 
 (deftest normalized-headers-upsert-and-reopen
@@ -386,7 +386,7 @@
                 (ex-data
                  (try
                    (sqlite/header-integrity-check! backend)
-                 (catch clojure.lang.ExceptionInfo error error))))))))))
+                 (catch kerror/ExceptionInfo error error))))))))))
 
 (deftest normalized-header-ancestry-reuses-one-bounded-read-cursor
   (with-database
@@ -475,7 +475,7 @@
                    (sqlite/save-host-headers-and-pending!
                     backend nil -1 rejected-host []
                     {:maximum-count 0 :maximum-bytes 0})
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (is (= (seq first-host) (seq (sqlite/host-state backend))))
         (sqlite/save-host-headers-and-pending!
          backend nil -1 first-host [] {:delete [hash]})
@@ -498,7 +498,7 @@
                     {:block-hash "wrong" :parent-hash "not-the-tip"
                      :height 1 :previous-height 0
                      :undo {:spent {} :created #{}}})
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (is (= -1 (:height (sqlite/status backend))))))))
 
 (deftest overwrite-undo-restores-the-prior-bip30-coin
@@ -776,7 +776,7 @@
                  (try
                    (sqlite/import-snapshot!
                     backend damaged #(when (= % 2) base-hash) options)
-                   (catch clojure.lang.ExceptionInfo error error))))))
+                   (catch kerror/ExceptionInfo error error))))))
         (is (= 0 (:coin-count (sqlite/status backend)))
             "a failed commitment rolls back all streamed rows")
         (is (= :assumed

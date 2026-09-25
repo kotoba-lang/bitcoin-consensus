@@ -857,7 +857,7 @@
                (assoc-in [:nodes hash :block-valid?] true)
                (assoc-in [:nodes hash :scripts-checked?]
                          scripts-checked?)))
-           (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) error
+           (catch :default error
              (throw (annotate-block-validation-error hash error))))))
      (assoc detached :active-tip fork) attach)))
 
@@ -967,7 +967,7 @@
             _
             (try
               (validate-block-context! state parsed-block parent-node)
-              (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default)
+              (catch :default
                   error
                 (throw (annotate-block-validation-error hash error))))
             _ (when (and existing

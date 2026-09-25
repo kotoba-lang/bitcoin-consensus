@@ -1,5 +1,5 @@
 (ns bitcoin.consensus.core-test
-  (:require [bitcoin.consensus.block :as block]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.block :as block]
             [bitcoin.consensus.assumeutxo :as assumeutxo]
             [bitcoin.consensus.chainstate :as chainstate]
             [bitcoin.consensus.codec :as codec]
@@ -109,7 +109,7 @@
    (ex-data
     (try
       (function)
-      (catch clojure.lang.ExceptionInfo exception exception)))))
+      (catch kerror/ExceptionInfo exception exception)))))
 
 (defn core-varint [value]
   (loop [value value result []]
@@ -526,7 +526,7 @@
           (try
             (chainstate/accept-block
              initial witness-mutated 2000000000)
-            (catch clojure.lang.ExceptionInfo value value))]
+            (catch kerror/ExceptionInfo value value))]
       (is (= :bitcoin.consensus/unexpected-witness
              (:type (ex-data error))))
       (is (chainstate/mutated-block-error? error))
@@ -1301,7 +1301,7 @@
               (chainstate/accept-header
                state (:header candidate) 2000000000)
               nil
-              (catch clojure.lang.ExceptionInfo exception exception))]
+              (catch kerror/ExceptionInfo exception exception))]
         (is (= :bitcoin.consensus/obsolete-block-version
                (:type (ex-data error))))
         (is (= expected-deployment (:deployment (ex-data error))))
@@ -1840,7 +1840,7 @@
                (ex-info "undo intentionally pruned"
                         {:type :bitcoin.consensus/undo-pruned
                          :hash hash})))})
-          (catch clojure.lang.ExceptionInfo value value))]
+          (catch kerror/ExceptionInfo value value))]
     (is (= :bitcoin.consensus/undo-pruned (:type (ex-data error))))
     (is (chainstate/local-validation-error? error))
     (is (false? (chainstate/invalid-block-error? error)))
@@ -1873,7 +1873,7 @@
         (try
           (chainstate/accept-block
            staged b3 2000000000 (constantly true))
-          (catch clojure.lang.ExceptionInfo error error))
+          (catch kerror/ExceptionInfo error error))
         failed-hash (get-in b1 [:header :hash-hex])
         marked
         (chainstate/mark-block-invalid
@@ -2165,10 +2165,10 @@
                          #(.nextInt random 256)))]
         (try
           (transaction/parse value)
-          (catch clojure.lang.ExceptionInfo _))
+          (catch kerror/ExceptionInfo _))
         (try
           (block/parse value)
-          (catch clojure.lang.ExceptionInfo _)))))
+          (catch kerror/ExceptionInfo _)))))
   (let [raw (hex->bytes genesis-block-hex)]
     (doseq [index (range (count raw))]
       (let [mutated (update raw index bit-xor 1)]
@@ -2177,7 +2177,7 @@
            (chainstate/initialize
             :mainnet (block/parse mutated) (constantly true))
            false
-           (catch clojure.lang.ExceptionInfo _ true))
+           (catch kerror/ExceptionInfo _ true))
          (str "mutated genesis byte " index " must fail closed"))))))
 
 (deftest deterministic-consensus-fuzz-smoke-is-replayable
