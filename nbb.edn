@@ -3,6 +3,9 @@
 ;; scripts/migrate-clojure-test-to-kotoba-test.cljk; :paths copied from deps.edn.
 {:paths ["src"]
  :deps {
+        ;; kotoba.lang.error replaced clojure.lang.ExceptionInfo here (2026-09-25).
+        ;; An explicit floor: tools.deps takes the NEWEST sha it is shown.
+        io.github.kotoba-lang/error {:git/sha "838dec56c9a5b74f9eec825a2fb28bda157f8cd3"}
         ;; kotoba.sql.conn replaced java.sql / javax.sql here (2026-09-25). An explicit
         ;; floor: tools.deps takes the NEWEST sha it is shown.
         io.github.kotoba-lang/sql {:git/sha "cc2b89d601c33e4acdfe7b45a0f7ff374ba38790"}

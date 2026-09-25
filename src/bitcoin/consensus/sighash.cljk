@@ -1,6 +1,6 @@
 (ns bitcoin.consensus.sighash
   "Legacy, BIP143, and BIP341 signature digest algorithms."
-  (:require [bitcoin.consensus.codec :as codec]
+  (:require [kotoba.bytes :as kbytes] [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.transaction :as transaction]
             [btc-crypto.signature :as signature]
             [sha256d.core :as sha256d]))
@@ -22,7 +22,7 @@
 (defn- tagged-digest [tag bytes]
   (let [tag-hash
         (single-digest
-         #?(:clj (seq (.getBytes ^String tag "UTF-8"))
+         #?(:clj (seq (kbytes/utf8-bytes ^String tag))
             :cljs (map #(.charCodeAt tag %) (range (count tag)))))]
     (single-digest (concat tag-hash tag-hash bytes))))
 

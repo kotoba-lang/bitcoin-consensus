@@ -1,6 +1,6 @@
 (ns bitcoin.consensus.script
   "Fail-closed Bitcoin Script evaluator for legacy, P2SH, and SegWit v0."
-  (:require [bitcoin.consensus.codec :as codec]
+  (:require [kotoba.lang.error :as kerror] [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.sighash :as sighash]
             [btc-crypto.core :as bitcoin-crypto]
             [btc-crypto.ripemd160 :as ripemd160]
@@ -153,7 +153,7 @@
                     :else [0 offset])
                   [_ offset] (codec/read-bytes script offset (long length))]
               {:offset offset :opcode opcode})
-            (catch clojure.lang.ExceptionInfo _ nil))]
+            (catch kerror/ExceptionInfo _ nil))]
           (recur
            next-offset opcode
            (+ total

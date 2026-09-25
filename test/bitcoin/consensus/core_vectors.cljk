@@ -4,7 +4,7 @@
   The harness intentionally runs only flag combinations implemented by this
   consensus kernel. Unsupported policy flags are reported as skipped rather
   than silently ignored."
-  (:require [kotoba.bytes :as kbytes] [bitcoin.consensus.script :as script]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [bitcoin.consensus.script :as script]
             [bitcoin.consensus.codec :as codec]
             [bitcoin.consensus.transaction :as transaction]
             [btc-crypto.schnorr :as schnorr]
@@ -247,7 +247,7 @@
               (try
                 (script/verify-input spending 0 coin active-flags)
                 true
-                (catch clojure.lang.ExceptionInfo _ false))
+                (catch kerror/ExceptionInfo _ false))
               expected-success? (= "OK" expected)]
           (if (= expected-success? actual)
             {:status :passed}
